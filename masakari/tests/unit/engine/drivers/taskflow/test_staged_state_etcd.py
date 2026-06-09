@@ -183,6 +183,29 @@ class EtcdStagedRecoveryStoreTestCase(test.NoDBTestCase):
         self.assertEqual([uuidsentinel.instance],
                          [state['instance_uuid'] for state in stale])
 
+    def test_list_all_instance_states_filters_and_limits(self):
+        self.store.create_or_get_instance_state(
+            uuidsentinel.notification, uuidsentinel.instance,
+            {'step': store_mod.STEP_STARTING,
+             'source_host': 'compute-1',
+             'dest_host': 'compute-2'})
+        self.store.create_or_get_instance_state(
+            uuidsentinel.notification, uuidsentinel.instance_2,
+            {'step': store_mod.STEP_ACTIVE,
+             'source_host': 'compute-1',
+             'dest_host': 'compute-3'})
+
+        states = self.store.list_all_instance_states(
+            filters={'step': store_mod.STEP_STARTING,
+                     'dest_host': 'compute-2'},
+            limit=10)
+
+        self.assertEqual([uuidsentinel.instance],
+                         [state['instance_uuid'] for state in states])
+
+        limited = self.store.list_all_instance_states(limit=1)
+        self.assertEqual(1, len(limited))
+
     def test_create_start_lease_attaches_ttl_lease(self):
         lease = self.store.create_start_lease(
             uuidsentinel.notification, uuidsentinel.instance, 'compute/2',
@@ -192,6 +215,23 @@ class EtcdStagedRecoveryStoreTestCase(test.NoDBTestCase):
         self.assertEqual(100, lease['etcd_lease_id'])
         self.assertEqual(100, self.client.lease_by_key[
             self.store.start_lease_key('compute/2', uuidsentinel.instance)])
+
+    def test_list_all_start_leases_filters_and_limits(self):
+        self.store.create_start_lease(
+            uuidsentinel.notification, uuidsentinel.instance, 'compute-2',
+            ttl=60)
+        self.store.create_start_lease(
+            uuidsentinel.notification, uuidsentinel.instance_2, 'compute-3',
+            ttl=60)
+
+        leases = self.store.list_all_start_leases(
+            filters={'dest_host': 'compute-2'}, limit=10)
+
+        self.assertEqual([uuidsentinel.instance],
+                         [lease['instance_uuid'] for lease in leases])
+
+        limited = self.store.list_all_start_leases(limit=1)
+        self.assertEqual(1, len(limited))
 
     def test_create_start_lease_revokes_unused_lease_on_conflict(self):
         self.store.create_start_lease(
@@ -219,6 +259,19 @@ class EtcdStagedRecoveryStoreTestCase(test.NoDBTestCase):
         limit = self.store.get_max_parallel_starts_per_host(default=2)
 
         self.assertEqual(2, limit)
+
+    def test_runtime_start_limit_reports_source(self):
+        limit, source = self.store.get_max_parallel_starts_per_host_with_source(
+            default=2)
+        self.assertEqual(2, limit)
+        self.assertEqual('config', source)
+
+        self.store.set_max_parallel_starts_per_host(4)
+
+        limit, source = self.store.get_max_parallel_starts_per_host_with_source(
+            default=2)
+        self.assertEqual(4, limit)
+        self.assertEqual('runtime', source)
 
     def test_runtime_start_limit_can_be_updated_and_cleared(self):
         self.store.set_max_parallel_starts_per_host(4)

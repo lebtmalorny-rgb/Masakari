@@ -29,7 +29,8 @@ max_parallel_starts_per_host = 2
 ```text
 BatchedStartInstancesTask
   -> EtcdStartLimiter(...)
-     -> CONF.staged_recovery.max_parallel_starts_per_host
+     -> EtcdStagedRecoveryStore.get_max_parallel_starts_per_host(...)
+        -> runtime etcd override или CONF.staged_recovery.max_parallel_starts_per_host
 ```
 
 При каждой попытке старта limiter:
@@ -86,28 +87,98 @@ limit снова берется из `masakari.conf`.
 
 ### Можно ли сделать это через `openstack` CLI
 
-В текущем server repo Masakari полноценная команда `openstack ...` не
-реализована, потому что OpenStackClient-команды Masakari находятся в отдельном
-клиентском репозитории `python-masakariclient`.
+На стороне Masakari server теперь есть REST API, поэтому лимит можно менять
+без доступа к контейнеру `masakari-engine`. Нативная команда вида
+`openstack masakari staged recovery ...` все еще должна быть добавлена в
+отдельном клиентском репозитории `python-masakariclient`, но у нее уже есть
+серверный REST-контракт.
 
-Что уже готово на стороне server/runtime:
+REST API:
 
-- лимит можно менять без restart через etcd runtime key;
-- есть admin-команда `masakari-manage staged_recovery set_start_limit`;
-- `EtcdStartLimiter` применяет новый лимит для новых allocation попыток.
+```http
+GET    /v1/{project_id}/staged-recovery/start-limit
+PUT    /v1/{project_id}/staged-recovery/start-limit
+DELETE /v1/{project_id}/staged-recovery/start-limit
+GET    /v1/{project_id}/staged-recovery/instances
+GET    /v1/{project_id}/staged-recovery/leases
+```
 
-Чтобы получить именно команду OpenStack CLI, следующий patch должен быть в
-`python-masakariclient` и должен добавить команды примерно такого вида:
+В примерах ниже `MASAKARI_API` - это root URL Masakari API без `/v1`, например
+`http://masakari-api.example.com:15868`.
+
+Пример установки лимита через REST:
+
+```bash
+curl -s -X PUT \
+  -H "X-Auth-Token: $OS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"start_limit": {"max_parallel_starts_per_host": 3}}' \
+  "$MASAKARI_API/v1/$OS_PROJECT_ID/staged-recovery/start-limit"
+```
+
+Пример просмотра effective limit:
+
+```bash
+curl -s -H "X-Auth-Token: $OS_TOKEN" \
+  "$MASAKARI_API/v1/$OS_PROJECT_ID/staged-recovery/start-limit"
+```
+
+Ответ:
+
+```json
+{
+  "start_limit": {
+    "max_parallel_starts_per_host": 3,
+    "source": "runtime"
+  }
+}
+```
+
+Пример просмотра staged states по notification:
+
+```bash
+curl -s -H "X-Auth-Token: $OS_TOKEN" \
+  "$MASAKARI_API/v1/$OS_PROJECT_ID/staged-recovery/instances?notification_uuid=$NOTIFICATION_UUID&limit=100"
+```
+
+Пример просмотра live leases по destination host:
+
+```bash
+curl -s -H "X-Auth-Token: $OS_TOKEN" \
+  "$MASAKARI_API/v1/$OS_PROJECT_ID/staged-recovery/leases?dest_host=compute-3&limit=100"
+```
+
+Query filters для `instances`:
+
+- `notification_uuid`;
+- `instance_uuid`;
+- `source_host`;
+- `dest_host`;
+- `step`;
+- `limit`.
+
+Query filters для `leases`:
+
+- `notification_uuid`;
+- `instance_uuid`;
+- `dest_host`;
+- `limit`.
+
+`limit` по умолчанию равен `100`, максимальное разрешенное значение `1000`.
+Для больших кластеров не стоит делать unfiltered diagnostic requests: endpoint
+читает staged recovery etcd prefix, а затем применяет лимит к ответу. Фильтр
+`dest_host` для leases оптимизирован и сужает etcd prefix scan.
+
+Чтобы получить удобную нативную команду OpenStack CLI, следующий patch должен
+быть в `python-masakariclient` и должен добавить команды примерно такого вида:
 
 ```bash
 openstack masakari staged recovery start limit show
 openstack masakari staged recovery start limit set 3
 openstack masakari staged recovery start limit unset
+openstack masakari staged recovery instance list --notification $NOTIFICATION_UUID
+openstack masakari staged recovery lease list --dest-host compute-3
 ```
-
-Для этого клиентскому репозиторию нужен либо новый REST API в Masakari API, либо
-отдельная административная интеграция. В рамках этого server patch set REST API
-не добавлялся.
 
 ## Нужно ли перезапускать `masakari-engine`
 

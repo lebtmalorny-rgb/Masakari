@@ -21,6 +21,7 @@ from masakari.policies import extension_info
 from masakari.policies import hosts
 from masakari.policies import notifications
 from masakari.policies import segments
+from masakari.policies import staged_recovery
 from masakari.policies import versions
 from masakari.policies import vmoves
 
@@ -32,6 +33,7 @@ def list_rules():
         hosts.list_rules(),
         notifications.list_rules(),
         segments.list_rules(),
+        staged_recovery.list_rules(),
         versions.list_rules(),
         vmoves.list_rules()
     )

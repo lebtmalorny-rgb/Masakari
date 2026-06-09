@@ -106,12 +106,72 @@ marked ``ERROR`` under a distributed lock. Existing unfinished notification
 processing can then retry the workflow and continue from the persisted etcd
 state.
 
+REST API
+--------
+
+The staged recovery API extension is an admin API for runtime control and
+diagnostics. The same routes are available with and without the project ID
+prefix because the v1 router registers both forms.
+
+``GET /v1/{project_id}/staged-recovery/start-limit``
+    Shows the effective start limit:
+
+    .. code-block:: json
+
+       {
+         "start_limit": {
+           "max_parallel_starts_per_host": 2,
+           "source": "config"
+         }
+       }
+
+    ``source`` is ``runtime`` when an etcd override is set and ``config`` when
+    the value comes from ``masakari.conf``.
+
+``PUT /v1/{project_id}/staged-recovery/start-limit``
+    Sets the runtime override in etcd:
+
+    .. code-block:: json
+
+       {
+         "start_limit": {
+           "max_parallel_starts_per_host": 3
+         }
+       }
+
+    The value must be an integer greater than or equal to ``1``.
+
+``DELETE /v1/{project_id}/staged-recovery/start-limit``
+    Clears the runtime override. New start-slot allocations then use
+    ``[staged_recovery] max_parallel_starts_per_host``.
+
+``GET /v1/{project_id}/staged-recovery/instances``
+    Lists staged recovery instance state. Supported query parameters are
+    ``notification_uuid``, ``instance_uuid``, ``source_host``, ``dest_host``,
+    ``step``, and ``limit``.
+
+``GET /v1/{project_id}/staged-recovery/leases``
+    Lists live start leases. Supported query parameters are
+    ``notification_uuid``, ``instance_uuid``, ``dest_host``, and ``limit``.
+    Filtering by ``dest_host`` narrows the etcd prefix scan.
+
+List APIs default to ``limit=100`` and reject values less than ``1`` or greater
+than ``1000``. Use filters for large clusters; an unfiltered diagnostic request
+still scans the staged recovery etcd prefix before applying the response limit.
+
+Example:
+
+.. code-block:: console
+
+   $ export MASAKARI_API=http://masakari-api.example.com:15868
+   $ curl -s -H "X-Auth-Token: $OS_TOKEN" \
+       "$MASAKARI_API/v1/$OS_PROJECT_ID/staged-recovery/start-limit"
+
 Internal Python APIs and Entry Points
 -------------------------------------
 
-The staged recovery feature does not add a new REST API. It adds internal
-Python APIs and TaskFlow entry points intended for Masakari engine code and
-operator-selected recovery flows.
+The staged recovery feature also adds internal Python APIs and TaskFlow entry
+points intended for Masakari engine code and operator-selected recovery flows.
 
 Nova wrapper
 ~~~~~~~~~~~~
@@ -166,10 +226,15 @@ etcd state store
     ``transition_instance_state()``, and ``mark_failed()``.
 
     The start-lease methods are ``list_start_leases()``,
-    ``create_start_lease()``, ``refresh_start_lease()``, and
-    ``release_start_lease()``. Lease keys are stored under
+    ``list_all_start_leases()``, ``create_start_lease()``,
+    ``refresh_start_lease()``, and ``release_start_lease()``. Lease keys are
+    stored under
     ``<etcd_prefix>/start-leases/<encoded_dest_host>/<instance_uuid>`` and are
     attached to etcd TTL leases.
+
+    The diagnostic methods ``list_all_instance_states()`` and
+    ``list_all_start_leases()`` support exact-match filters and a response
+    limit for the REST API.
 
 ``encode_key_part(value)`` and ``decode_key_part(value)``
     Encode etcd key path components so host names and UUID-like values cannot
@@ -209,9 +274,10 @@ configuration:
 limit falls back to ``[staged_recovery] max_parallel_starts_per_host`` from
 ``masakari.conf``.
 
-The Masakari server repository does not provide an OpenStackClient command for
-this yet. A command such as ``openstack masakari staged recovery start limit
-set`` would need to be added in the client plugin repository.
+The Masakari server now exposes REST API support for this operation. Native
+OpenStackClient commands such as ``openstack masakari staged recovery start
+limit set`` still need to be added in the ``python-masakariclient`` plugin
+repository.
 
 Manager reconciliation
 ~~~~~~~~~~~~~~~~~~~~~~

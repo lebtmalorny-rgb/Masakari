@@ -176,6 +176,17 @@ class EtcdStagedRecoveryStore(object):
         return [loads(value) for value, _metadata in
                 self.client.get_prefix(prefix)]
 
+    def _matches_filters(self, record, filters):
+        for name, expected in (filters or {}).items():
+            if record.get(name) != expected:
+                return False
+        return True
+
+    def _apply_limit(self, records, limit):
+        if limit is None:
+            return records
+        return records[:limit]
+
     def _validate_positive_int(self, value, name):
         try:
             value = int(value)
@@ -237,13 +248,22 @@ class EtcdStagedRecoveryStore(object):
         return self.client.delete(self.runtime_config_key(name))
 
     def get_max_parallel_starts_per_host(self, default):
+        limit, _source = self.get_max_parallel_starts_per_host_with_source(
+            default)
+        return limit
+
+    def get_max_parallel_starts_per_host_with_source(self, default):
         record = self.get_runtime_config(
             CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
         if record is None:
-            return self._validate_positive_int(
-                default, CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
-        return self._validate_positive_int(
-            record.get('value'), CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
+            return (
+                self._validate_positive_int(
+                    default, CONFIG_MAX_PARALLEL_STARTS_PER_HOST),
+                'config')
+        return (
+            self._validate_positive_int(
+                record.get('value'), CONFIG_MAX_PARALLEL_STARTS_PER_HOST),
+            'runtime')
 
     def set_max_parallel_starts_per_host(self, value):
         value = self._validate_positive_int(
@@ -263,6 +283,15 @@ class EtcdStagedRecoveryStore(object):
     def list_instance_states(self, notification_uuid):
         return self._list_values(
             self.notification_instances_prefix(notification_uuid))
+
+    def list_all_instance_states(self, filters=None, limit=None):
+        states = self._list_values('%s/notifications/' % self.prefix)
+        states = [state for state in states
+                  if self._matches_filters(state, filters)]
+        states.sort(key=lambda state: (
+            state.get('notification_uuid', ''),
+            state.get('instance_uuid', '')))
+        return self._apply_limit(states, limit)
 
     def list_stale_instance_states(self, older_than_seconds, steps, now=None):
         if now is None:
@@ -336,6 +365,19 @@ class EtcdStagedRecoveryStore(object):
 
     def list_start_leases(self, dest_host):
         return self._list_values(self.start_lease_prefix(dest_host))
+
+    def list_all_start_leases(self, filters=None, limit=None):
+        if filters and filters.get('dest_host'):
+            prefix = self.start_lease_prefix(filters['dest_host'])
+        else:
+            prefix = '%s/start-leases/' % self.prefix
+        leases = self._list_values(prefix)
+        leases = [lease for lease in leases
+                  if self._matches_filters(lease, filters)]
+        leases.sort(key=lambda lease: (
+            lease.get('dest_host', ''),
+            lease.get('instance_uuid', '')))
+        return self._apply_limit(leases, limit)
 
     def create_start_lease(self, notification_uuid, instance_uuid, dest_host,
                            ttl):

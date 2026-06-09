@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Adds an admin ``staged-recovery`` REST API extension for etcd-backed staged
+    host recovery. Operators can inspect and update the runtime
+    ``max_parallel_starts_per_host`` override, list staged instance states, and
+    list live start leases.

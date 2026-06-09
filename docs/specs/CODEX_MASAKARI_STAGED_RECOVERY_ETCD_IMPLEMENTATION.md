@@ -59,33 +59,43 @@
    - добавлены команды `masakari-manage staged_recovery get_start_limit`,
      `set_start_limit` и `clear_start_limit`.
 
-7. Добавлены staged TaskFlow tasks:
+7. Добавлен admin REST API для staged recovery:
+   - `GET /v1/{project_id}/staged-recovery/start-limit`;
+   - `PUT /v1/{project_id}/staged-recovery/start-limit`;
+   - `DELETE /v1/{project_id}/staged-recovery/start-limit`;
+   - `GET /v1/{project_id}/staged-recovery/instances`;
+   - `GET /v1/{project_id}/staged-recovery/leases`;
+   - endpoints защищены policy rules `os_masakari_api:staged-recovery:*`;
+   - list endpoints поддерживают filters и `limit`.
+
+8. Добавлены staged TaskFlow tasks:
    - `ReconcileStagedRecoveryTask`;
    - `EvacuateToStoppedTask`;
    - `BatchedStartInstancesTask`.
 
-8. Добавлены entry points `masakari.task_flow.tasks`:
+9. Добавлены entry points:
    - `reconcile_staged_recovery_task`;
    - `evacuate_to_stopped_task`;
-   - `batched_start_instances_task`.
+   - `batched_start_instances_task`;
+   - API extension `staged_recovery`.
 
-9. Добавлен sample recovery config:
+10. Добавлен sample recovery config:
    - `etc/masakari/masakari-staged-recovery-methods.conf`;
    - default `masakari-custom-recovery-methods.conf` не изменен, чтобы staged
      workflow не включался неявно.
 
-10. Добавлен manager reconcile:
+11. Добавлен manager reconcile:
    - periodic task ищет stale staged states в etcd;
    - для каждого notification берет distributed lock;
    - если SQL notification все еще `RUNNING`, переводит его в `ERROR`;
    - повторный запуск делает штатный unfinished notification processing.
 
-11. Добавлен startup/stop coordination для RPC service:
+12. Добавлен startup/stop coordination для RPC service:
     - если `[coordination] backend_url` задан, engine service запускает и
       останавливает глобальный coordinator;
     - это нужно для staged limiter и manager reconcile locks.
 
-12. Добавлена документация, release note и unit-тесты:
+13. Добавлена документация, release note и unit-тесты:
     - Nova wrapper tests;
     - etcd state store tests;
     - start limiter tests;
@@ -151,8 +161,13 @@
 - `set_runtime_config(name, value)`;
 - `clear_runtime_config(name)`;
 - `get_max_parallel_starts_per_host(default)`;
+- `get_max_parallel_starts_per_host_with_source(default)`;
 - `set_max_parallel_starts_per_host(value)`;
 - `clear_max_parallel_starts_per_host()`.
+
+Diagnostic/list methods для REST API:
+- `list_all_instance_states(filters=None, limit=None)`;
+- `list_all_start_leases(filters=None, limit=None)`.
 
 Key helpers:
 - `instance_key(notification_uuid, instance_uuid)`;
@@ -267,6 +282,83 @@ driver не делает fallback на другой host recovery method пос�
 Удаляет runtime override из etcd. После этого лимит снова берется из
 `masakari.conf`.
 
+### `masakari.api.openstack.ha.staged_recovery`
+
+#### `StagedRecoveryController`
+
+Admin REST controller для runtime staged recovery state.
+
+Методы:
+- `show(req, id)`;
+- `update(req, id, body)`;
+- `delete(req, id)`.
+
+Поддерживаемые `id`:
+- `start-limit`;
+- `instances`;
+- `leases`.
+
+`GET start-limit` возвращает:
+
+```json
+{
+  "start_limit": {
+    "max_parallel_starts_per_host": 2,
+    "source": "config"
+  }
+}
+```
+
+`PUT start-limit` принимает:
+
+```json
+{
+  "start_limit": {
+    "max_parallel_starts_per_host": 3
+  }
+}
+```
+
+`GET instances` поддерживает exact-match filters:
+- `notification_uuid`;
+- `instance_uuid`;
+- `source_host`;
+- `dest_host`;
+- `step`;
+- `limit`.
+
+`GET leases` поддерживает exact-match filters:
+- `notification_uuid`;
+- `instance_uuid`;
+- `dest_host`;
+- `limit`.
+
+Для list endpoints `limit` по умолчанию равен `100`, максимум `1000`.
+
+#### `StagedRecovery`
+
+API extension class. Регистрирует resource `staged-recovery` через
+`masakari.api.v1.extensions`.
+
+### `masakari.api.openstack.ha.schemas.staged_recovery`
+
+#### `update_start_limit`
+
+JSON schema для `PUT /staged-recovery/start-limit`. Проверяет наличие объекта
+`start_limit` и integer поля `max_parallel_starts_per_host`. Проверка `>= 1`
+остается в `EtcdStagedRecoveryStore`, чтобы один и тот же validation path
+использовался REST API и `masakari-manage`.
+
+### `masakari.policies.staged_recovery`
+
+Новые policy rules:
+- `os_masakari_api:staged-recovery:start_limit:show`;
+- `os_masakari_api:staged-recovery:start_limit:update`;
+- `os_masakari_api:staged-recovery:start_limit:delete`;
+- `os_masakari_api:staged-recovery:instances:index`;
+- `os_masakari_api:staged-recovery:leases:index`;
+- `os_masakari_api:staged-recovery:discoverable`.
+
 ## Новые entry points
 
 В `setup.cfg` добавлены:
@@ -276,19 +368,27 @@ masakari.task_flow.tasks =
     reconcile_staged_recovery_task = masakari.engine.drivers.taskflow.staged_host_failure:ReconcileStagedRecoveryTask
     evacuate_to_stopped_task = masakari.engine.drivers.taskflow.staged_host_failure:EvacuateToStoppedTask
     batched_start_instances_task = masakari.engine.drivers.taskflow.staged_host_failure:BatchedStartInstancesTask
+
+masakari.api.v1.extensions =
+    staged_recovery = masakari.api.openstack.ha.staged_recovery:StagedRecovery
 ```
 
 ## Новые файлы
 
 - `masakari/conf/staged_recovery.py`
+- `masakari/api/openstack/ha/staged_recovery.py`
+- `masakari/api/openstack/ha/schemas/staged_recovery.py`
 - `masakari/engine/drivers/taskflow/staged_state_etcd.py`
 - `masakari/engine/drivers/taskflow/staged_limiter.py`
 - `masakari/engine/drivers/taskflow/staged_host_failure.py`
+- `masakari/policies/staged_recovery.py`
 - `etc/masakari/masakari-staged-recovery-methods.conf`
 - `doc/source/configuration/staged_recovery.rst`
 - `releasenotes/notes/staged-recovery-etcd-3f2bb8e7a6d2c955.yaml`
+- `releasenotes/notes/staged-recovery-rest-api-8ce2a61dc10f3d91.yaml`
 - unit-тесты `test_nova_staged.py`, `test_staged_state_etcd.py`,
-  `test_staged_limiter.py`, `test_staged_host_failure.py`
+  `test_staged_limiter.py`, `test_staged_host_failure.py`,
+  `test_staged_recovery.py`
 
 ## Проверки, выполненные перед первым commit
 
