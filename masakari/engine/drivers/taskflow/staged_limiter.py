@@ -45,7 +45,7 @@ class EtcdStartLimiter(object):
         self.state_store = state_store
         self.owner = owner
         self.coordinator = coordinator or coordination.COORDINATOR
-        self.max_parallel = (
+        self.configured_max_parallel = (
             CONF.staged_recovery.max_parallel_starts_per_host)
         self.retry_interval = CONF.staged_recovery.slot_retry_interval
         self.ttl = CONF.staged_recovery.slot_lease_ttl
@@ -62,6 +62,10 @@ class EtcdStartLimiter(object):
     def _lock_name(self, dest_host):
         return 'staged-start-lock-%s' % dest_host
 
+    def _max_parallel(self):
+        return self.state_store.get_max_parallel_starts_per_host(
+            self.configured_max_parallel)
+
     def acquire(self, notification_uuid, instance_uuid, dest_host):
         while True:
             lock = self.coordinator.get_lock(self._lock_name(dest_host))
@@ -72,7 +76,7 @@ class EtcdStartLimiter(object):
 
             with lock:
                 live = self.state_store.list_start_leases(dest_host)
-                if len(live) < self.max_parallel:
+                if len(live) < self._max_parallel():
                     record = self.state_store.create_start_lease(
                         notification_uuid=notification_uuid,
                         instance_uuid=instance_uuid,

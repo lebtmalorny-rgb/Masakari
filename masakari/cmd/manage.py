@@ -30,6 +30,7 @@ from masakari import context
 from masakari import db
 from masakari.db import api as db_api
 from masakari.db.sqlalchemy import migration as db_migration
+from masakari.engine.drivers.taskflow import staged_state_etcd as staged_state
 from masakari import exception
 from masakari.i18n import _
 from masakari import utils
@@ -106,8 +107,38 @@ class DbCommands(object):
         db_api.purge_deleted_rows(ctx, age_in_days, max_rows)
 
 
+class StagedRecoveryCommands(object):
+    """Class for managing staged recovery runtime settings."""
+
+    def _store(self):
+        return staged_state.EtcdStagedRecoveryStore(
+            CONF, owner='masakari-manage')
+
+    def get_start_limit(self):
+        """Print effective staged start limit per destination host."""
+        value = self._store().get_max_parallel_starts_per_host(
+            default=CONF.staged_recovery.max_parallel_starts_per_host)
+        print('%s' % value)
+
+    @args('value', type=int,
+          help='Runtime start limit per destination host.')
+    def set_start_limit(self, value):
+        """Set staged start limit per destination host in etcd."""
+        try:
+            value = self._store().set_max_parallel_starts_per_host(value)
+        except exception.InvalidInput as exc:
+            sys.exit(str(exc))
+        print('%s' % value)
+
+    def clear_start_limit(self):
+        """Clear runtime staged start limit override from etcd."""
+        self._store().clear_max_parallel_starts_per_host()
+        print('Runtime staged recovery start limit cleared.')
+
+
 CATEGORIES = {
     'db': DbCommands,
+    'staged_recovery': StagedRecoveryCommands,
 }
 
 

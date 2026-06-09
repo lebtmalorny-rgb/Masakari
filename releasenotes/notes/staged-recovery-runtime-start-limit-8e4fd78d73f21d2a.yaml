@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    Added a runtime etcd override for the staged recovery per-destination-host
+    start limit. Operators can now use ``masakari-manage staged_recovery
+    get_start_limit``, ``set_start_limit`` and ``clear_start_limit`` to adjust
+    the effective limit for new start-slot allocations without restarting
+    ``masakari-engine``.

@@ -214,3 +214,24 @@ class EtcdStagedRecoveryStoreTestCase(test.NoDBTestCase):
 
         self.assertEqual([], self.store.list_start_leases('compute-2'))
         self.assertEqual([100], self.client.revoked_lease_ids)
+
+    def test_runtime_start_limit_defaults_to_config_value(self):
+        limit = self.store.get_max_parallel_starts_per_host(default=2)
+
+        self.assertEqual(2, limit)
+
+    def test_runtime_start_limit_can_be_updated_and_cleared(self):
+        self.store.set_max_parallel_starts_per_host(4)
+
+        self.assertEqual(4, self.store.get_max_parallel_starts_per_host(
+            default=2))
+
+        self.store.clear_max_parallel_starts_per_host()
+
+        self.assertEqual(2, self.store.get_max_parallel_starts_per_host(
+            default=2))
+
+    def test_runtime_start_limit_rejects_invalid_value(self):
+        self.assertRaises(
+            store_mod.exception.InvalidInput,
+            self.store.set_max_parallel_starts_per_host, 0)

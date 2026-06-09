@@ -73,3 +73,50 @@ class DBCommandsTestCase(test.TestCase):
                                max_rows=value)
         expected = "Invalid input received: max_rows must be <= 2147483647"
         self.assertEqual(expected, ex.code)
+
+
+class StagedRecoveryCommandsTestCase(test.TestCase):
+
+    def setUp(self):
+        super(StagedRecoveryCommandsTestCase, self).setUp()
+        self.commands = manage.StagedRecoveryCommands()
+
+    @mock.patch('builtins.print')
+    @mock.patch('masakari.cmd.manage.staged_state.EtcdStagedRecoveryStore')
+    def test_get_start_limit_prints_effective_limit(self, mock_store_cls,
+                                                    mock_print):
+        store = mock_store_cls.return_value
+        store.get_max_parallel_starts_per_host.return_value = 3
+
+        self.commands.get_start_limit()
+
+        store.get_max_parallel_starts_per_host.assert_called_once_with(
+            default=2)
+        mock_print.assert_called_once_with('3')
+
+    @mock.patch('builtins.print')
+    @mock.patch('masakari.cmd.manage.staged_state.EtcdStagedRecoveryStore')
+    def test_set_start_limit_updates_runtime_limit(self, mock_store_cls,
+                                                   mock_print):
+        store = mock_store_cls.return_value
+        store.set_max_parallel_starts_per_host.return_value = 4
+
+        self.commands.set_start_limit(4)
+
+        store.set_max_parallel_starts_per_host.assert_called_once_with(4)
+        mock_print.assert_called_once_with('4')
+
+    @mock.patch('builtins.print')
+    @mock.patch('masakari.cmd.manage.staged_state.EtcdStagedRecoveryStore')
+    def test_clear_start_limit_removes_runtime_limit(self, mock_store_cls,
+                                                     mock_print):
+        self.commands.clear_start_limit()
+
+        store = mock_store_cls.return_value
+        store.clear_max_parallel_starts_per_host.assert_called_once_with()
+        mock_print.assert_called_once_with(
+            'Runtime staged recovery start limit cleared.')
+
+    def test_staged_recovery_category_is_registered(self):
+        self.assertIs(manage.StagedRecoveryCommands,
+                      manage.CATEGORIES['staged_recovery'])

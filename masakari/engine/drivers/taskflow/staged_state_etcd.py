@@ -41,6 +41,8 @@ STEP_IGNORED = 'IGNORED'
 
 FINAL_STEPS = (STEP_ACTIVE, STEP_FAILED, STEP_IGNORED)
 
+CONFIG_MAX_PARALLEL_STARTS_PER_HOST = 'max_parallel_starts_per_host'
+
 
 class ConcurrentStateUpdate(exception.MasakariException):
     msg_fmt = "Concurrent staged recovery state update for %(key)s."
@@ -158,6 +160,9 @@ class EtcdStagedRecoveryStore(object):
         return '%s/start-leases/%s/' % (
             self.prefix, encode_key_part(dest_host))
 
+    def runtime_config_key(self, name):
+        return '%s/config/%s' % (self.prefix, encode_key_part(name))
+
     def _get_raw(self, key):
         result = self.client.get(key)
         if not result:
@@ -170,6 +175,17 @@ class EtcdStagedRecoveryStore(object):
     def _list_values(self, prefix):
         return [loads(value) for value, _metadata in
                 self.client.get_prefix(prefix)]
+
+    def _validate_positive_int(self, value, name):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise exception.InvalidInput(
+                reason='%s must be an integer' % name)
+        if value < 1:
+            raise exception.InvalidInput(
+                reason='%s must be >= 1' % name)
+        return value
 
     def _base_state(self, notification_uuid, instance_uuid, values):
         now = utcnow_iso()
@@ -199,6 +215,45 @@ class EtcdStagedRecoveryStore(object):
         if raw is None:
             raise StateNotFound(key=key)
         return loads(raw)
+
+    def get_runtime_config(self, name):
+        raw = self._get_raw(self.runtime_config_key(name))
+        if raw is None:
+            return None
+        return loads(raw)
+
+    def set_runtime_config(self, name, value):
+        record = {
+            'schema_version': SCHEMA_VERSION,
+            'name': name,
+            'value': value,
+            'owner': self.owner,
+            'updated_at': utcnow_iso(),
+        }
+        self.client.put(self.runtime_config_key(name), dumps(record))
+        return record
+
+    def clear_runtime_config(self, name):
+        return self.client.delete(self.runtime_config_key(name))
+
+    def get_max_parallel_starts_per_host(self, default):
+        record = self.get_runtime_config(
+            CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
+        if record is None:
+            return self._validate_positive_int(
+                default, CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
+        return self._validate_positive_int(
+            record.get('value'), CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
+
+    def set_max_parallel_starts_per_host(self, value):
+        value = self._validate_positive_int(
+            value, CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
+        self.set_runtime_config(CONFIG_MAX_PARALLEL_STARTS_PER_HOST, value)
+        return value
+
+    def clear_max_parallel_starts_per_host(self):
+        return self.clear_runtime_config(
+            CONFIG_MAX_PARALLEL_STARTS_PER_HOST)
 
     def get_instance_state(self, notification_uuid, instance_uuid):
         raw = self._get_raw(self.instance_key(notification_uuid,

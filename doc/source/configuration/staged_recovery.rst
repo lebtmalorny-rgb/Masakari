@@ -188,6 +188,31 @@ Start limiter
 ``EtcdStartLimiter.release(slot)``
     Deletes the start lease key and revokes the associated etcd lease.
 
+Runtime Limit Management
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The configured ``max_parallel_starts_per_host`` value can be overridden at
+runtime in etcd. The engine reads the effective value when allocating new start
+slots, so changing the runtime override does not require restarting
+``masakari-engine``.
+
+Use ``masakari-manage`` on a host or container with access to Masakari
+configuration:
+
+.. code-block:: console
+
+   $ masakari-manage staged_recovery get_start_limit
+   $ masakari-manage staged_recovery set_start_limit 3
+   $ masakari-manage staged_recovery clear_start_limit
+
+``clear_start_limit`` removes the runtime override. After that, the effective
+limit falls back to ``[staged_recovery] max_parallel_starts_per_host`` from
+``masakari.conf``.
+
+The Masakari server repository does not provide an OpenStackClient command for
+this yet. A command such as ``openstack masakari staged recovery start limit
+set`` would need to be added in the client plugin repository.
+
 Manager reconciliation
 ~~~~~~~~~~~~~~~~~~~~~~
 

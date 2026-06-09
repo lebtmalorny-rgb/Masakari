@@ -43,19 +43,78 @@ BatchedStartInstancesTask
 
 ## Можно ли поменять лимит на работающем кластере
 
-Практическое правило:
+Да. Реализация поддерживает runtime override в etcd. Это позволяет изменить
+лимит для новых start-slot allocation без перезапуска `masakari-engine`.
+
+Runtime override хранится в etcd:
 
 ```text
-Да, но не hot-reload-ом. Нужно обновить config и перезапустить masakari-engine.
+<etcd_prefix>/config/max_parallel_starts_per_host
 ```
 
-Причина:
+При каждой попытке взять start slot `EtcdStartLimiter` читает effective limit:
 
-- `max_parallel_starts_per_host` зарегистрирован как обычный oslo.config option;
-- он не помечен как mutable option;
-- уже созданный `EtcdStartLimiter` хранит значение лимита в памяти;
-- running `masakari-engine` не обязан перечитать это значение из файла без
-  restart.
+```text
+runtime etcd override, если он задан
+иначе значение из masakari.conf
+```
+
+### Команды управления runtime limit
+
+В этом репозитории добавлена server-side admin-команда через `masakari-manage`:
+
+```bash
+masakari-manage staged_recovery get_start_limit
+masakari-manage staged_recovery set_start_limit 3
+masakari-manage staged_recovery clear_start_limit
+```
+
+Команды используют тот же etcd backend, что и staged recovery state. Их нужно
+запускать там, где доступен `masakari.conf` с `[staged_recovery]` и
+`[coordination]`.
+
+Пример для Kolla container:
+
+```bash
+docker exec -it masakari_engine masakari-manage staged_recovery get_start_limit
+docker exec -it masakari_engine masakari-manage staged_recovery set_start_limit 3
+docker exec -it masakari_engine masakari-manage staged_recovery clear_start_limit
+```
+
+`clear_start_limit` удаляет runtime override из etcd. После этого effective
+limit снова берется из `masakari.conf`.
+
+### Можно ли сделать это через `openstack` CLI
+
+В текущем server repo Masakari полноценная команда `openstack ...` не
+реализована, потому что OpenStackClient-команды Masakari находятся в отдельном
+клиентском репозитории `python-masakariclient`.
+
+Что уже готово на стороне server/runtime:
+
+- лимит можно менять без restart через etcd runtime key;
+- есть admin-команда `masakari-manage staged_recovery set_start_limit`;
+- `EtcdStartLimiter` применяет новый лимит для новых allocation попыток.
+
+Чтобы получить именно команду OpenStack CLI, следующий patch должен быть в
+`python-masakariclient` и должен добавить команды примерно такого вида:
+
+```bash
+openstack masakari staged recovery start limit show
+openstack masakari staged recovery start limit set 3
+openstack masakari staged recovery start limit unset
+```
+
+Для этого клиентскому репозиторию нужен либо новый REST API в Masakari API, либо
+отдельная административная интеграция. В рамках этого server patch set REST API
+не добавлялся.
+
+## Нужно ли перезапускать `masakari-engine`
+
+Для runtime override через `masakari-manage` перезапуск не нужен.
+
+Перезапуск нужен только если меняется static config в `masakari.conf`, например
+если runtime override очищен, а нужно изменить fallback/default:
 
 Безопасный порядок для Kolla/Kolla-Ansible:
 
@@ -79,16 +138,14 @@ BatchedStartInstancesTask
 - существующие etcd lease keys останутся до release или TTL expiration;
 - новые start slots не будут выдаваться на host, пока число live leases не
   станет меньше нового лимита;
-- если часть engine-процессов еще работает со старым большим лимитом, они могут
-  временно выдавать больше слотов, поэтому для уменьшения лимита нужно
-  перезапустить все `masakari-engine` как можно более синхронно.
+- если лимит меняется через runtime override, все engine-процессы увидят новое
+  значение при следующей allocation попытке.
 
 Для увеличения лимита, например с `2` до `4`:
 
 - существующие leases сохраняются;
-- после restart engine сможет выдавать больше новых slots;
-- эффект появится для новых allocation попыток, а не задним числом для уже
-  созданных limiter objects.
+- engine сможет выдавать больше новых slots после изменения runtime override;
+- эффект появится для новых allocation попыток.
 
 ## Базовая настройка для примеров
 

@@ -111,6 +111,22 @@ class EtcdStartLimiterTestCase(test.NoDBTestCase):
             limiter.acquire, uuidsentinel.notification, uuidsentinel.instance,
             'compute-2')
 
+    def test_acquire_reads_runtime_limit_after_limiter_creation(self):
+        limiter = self._limiter()
+        self.store.create_start_lease(
+            uuidsentinel.notification, uuidsentinel.instance_2, 'compute-2',
+            ttl=60)
+
+        self.store.set_max_parallel_starts_per_host(2)
+
+        with mock.patch.object(staged_limiter.eventlet, 'sleep') as sleep:
+            slot = limiter.acquire(
+                uuidsentinel.notification, uuidsentinel.instance,
+                'compute-2')
+
+        self.assertEqual(uuidsentinel.instance, slot.instance_uuid)
+        self.assertFalse(sleep.called)
+
     def test_init_rejects_ttl_shorter_than_start_window(self):
         self.override_config('start_timeout', 90, group='staged_recovery')
         self.override_config('batch_delay', 10, group='staged_recovery')

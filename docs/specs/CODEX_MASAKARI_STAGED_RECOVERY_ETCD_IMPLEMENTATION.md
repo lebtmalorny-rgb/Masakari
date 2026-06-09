@@ -51,33 +51,41 @@
    - `slot_lease_ttl` валидируется как минимум
      `start_timeout + batch_delay`.
 
-6. Добавлены staged TaskFlow tasks:
+6. Добавлен runtime override лимита старта:
+   - ключ хранится в etcd под `<etcd_prefix>/config/max_parallel_starts_per_host`;
+   - `EtcdStartLimiter` читает effective limit при каждой allocation попытке;
+   - если runtime override отсутствует, используется значение из
+     `masakari.conf`;
+   - добавлены команды `masakari-manage staged_recovery get_start_limit`,
+     `set_start_limit` и `clear_start_limit`.
+
+7. Добавлены staged TaskFlow tasks:
    - `ReconcileStagedRecoveryTask`;
    - `EvacuateToStoppedTask`;
    - `BatchedStartInstancesTask`.
 
-7. Добавлены entry points `masakari.task_flow.tasks`:
+8. Добавлены entry points `masakari.task_flow.tasks`:
    - `reconcile_staged_recovery_task`;
    - `evacuate_to_stopped_task`;
    - `batched_start_instances_task`.
 
-8. Добавлен sample recovery config:
+9. Добавлен sample recovery config:
    - `etc/masakari/masakari-staged-recovery-methods.conf`;
    - default `masakari-custom-recovery-methods.conf` не изменен, чтобы staged
      workflow не включался неявно.
 
-9. Добавлен manager reconcile:
+10. Добавлен manager reconcile:
    - periodic task ищет stale staged states в etcd;
    - для каждого notification берет distributed lock;
    - если SQL notification все еще `RUNNING`, переводит его в `ERROR`;
    - повторный запуск делает штатный unfinished notification processing.
 
-10. Добавлен startup/stop coordination для RPC service:
+11. Добавлен startup/stop coordination для RPC service:
     - если `[coordination] backend_url` задан, engine service запускает и
       останавливает глобальный coordinator;
     - это нужно для staged limiter и manager reconcile locks.
 
-11. Добавлена документация, release note и unit-тесты:
+12. Добавлена документация, release note и unit-тесты:
     - Nova wrapper tests;
     - etcd state store tests;
     - start limiter tests;
@@ -138,11 +146,20 @@
 - `refresh_start_lease(lease_record)`;
 - `release_start_lease(dest_host, instance_uuid)`.
 
+Методы runtime config:
+- `get_runtime_config(name)`;
+- `set_runtime_config(name, value)`;
+- `clear_runtime_config(name)`;
+- `get_max_parallel_starts_per_host(default)`;
+- `set_max_parallel_starts_per_host(value)`;
+- `clear_max_parallel_starts_per_host()`.
+
 Key helpers:
 - `instance_key(notification_uuid, instance_uuid)`;
 - `notification_instances_prefix(notification_uuid)`;
 - `start_lease_key(dest_host, instance_uuid)`;
 - `start_lease_prefix(dest_host)`;
+- `runtime_config_key(name)`;
 - `encode_key_part(value)`;
 - `decode_key_part(value)`.
 
@@ -161,7 +178,9 @@ Distributed limiter для start операций.
 - `release(slot)`.
 
 `acquire()` возвращает `StartSlot`. Если coordination lock недоступен, метод
-падает закрыто через `MasakariException`.
+падает закрыто через `MasakariException`. Перед проверкой capacity метод читает
+runtime override `max_parallel_starts_per_host` из etcd; если override не задан,
+использует значение из `masakari.conf`.
 
 #### `StartSlot`
 
@@ -229,6 +248,24 @@ Periodic task, активный только при `CONF.staged_recovery.enable
 driver не делает fallback на другой host recovery method после этой ошибки,
 потому что evacuation уже могла частично завершиться, а повторный fallback
 может привести к небезопасному поведению.
+
+### `masakari.cmd.manage`
+
+#### `masakari-manage staged_recovery get_start_limit`
+
+Печатает effective staged start limit. Если runtime override в etcd отсутствует,
+печатает значение из `masakari.conf`.
+
+#### `masakari-manage staged_recovery set_start_limit <value>`
+
+Пишет runtime override в etcd. Значение должно быть целым числом `>= 1`.
+Новый лимит применяется для новых start-slot allocation попыток без
+перезапуска `masakari-engine`.
+
+#### `masakari-manage staged_recovery clear_start_limit`
+
+Удаляет runtime override из etcd. После этого лимит снова берется из
+`masakari.conf`.
 
 ## Новые entry points
 
