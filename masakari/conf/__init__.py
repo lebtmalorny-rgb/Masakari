@@ -26,6 +26,7 @@ from masakari.conf import nova
 from masakari.conf import osapi_v1
 from masakari.conf import paths
 from masakari.conf import service
+from masakari.conf import staged_recovery
 from masakari.conf import ssl
 from masakari.conf import wsgi
 
@@ -43,4 +44,5 @@ osapi_v1.register_opts(CONF)
 paths.register_opts(CONF)
 ssl.register_opts(CONF)
 service.register_opts(CONF)
+staged_recovery.register_opts(CONF)
 wsgi.register_opts(CONF)

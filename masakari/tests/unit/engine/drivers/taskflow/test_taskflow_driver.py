@@ -145,6 +145,42 @@ class TaskflowDriverTestCase(test.TestCase):
     @mock.patch.object(base, 'DynamicLogListener')
     @mock.patch.object(host_failure, 'get_auto_flow')
     @mock.patch.object(host_failure, 'get_rh_flow')
+    def test_auto_priority_recovery_flow_does_not_fallback_after_staged_start(
+        self, mock_rh_flow, mock_auto_flow, mock_listener):
+        mock_auto_flow.return_value = FakeFlow
+        FakeFlow.run = mock.Mock(
+            side_effect=exception.StagedStartFailureException)
+
+        self.assertRaises(
+            exception.StagedStartFailureException,
+            self.taskflow_driver.execute_host_failure, self.ctxt, 'fake_host',
+            fields.FailoverSegmentRecoveryMethod.AUTO_PRIORITY,
+            uuidsentinel.fake_notification,
+            reserved_host_list=['host-1', 'host-2'])
+        self.assertTrue(mock_auto_flow.called)
+        self.assertFalse(mock_rh_flow.called)
+
+    @mock.patch.object(base, 'DynamicLogListener')
+    @mock.patch.object(host_failure, 'get_auto_flow')
+    @mock.patch.object(host_failure, 'get_rh_flow')
+    def test_rh_priority_recovery_flow_does_not_fallback_after_staged_start(
+        self, mock_rh_flow, mock_auto_flow, mock_listener):
+        mock_rh_flow.return_value = FakeFlow
+        FakeFlow.run = mock.Mock(
+            side_effect=exception.StagedStartFailureException)
+
+        self.assertRaises(
+            exception.StagedStartFailureException,
+            self.taskflow_driver.execute_host_failure, self.ctxt, 'fake_host',
+            fields.FailoverSegmentRecoveryMethod.RH_PRIORITY,
+            uuidsentinel.fake_notification,
+            reserved_host_list=['host-1', 'host-2'])
+        self.assertTrue(mock_rh_flow.called)
+        self.assertFalse(mock_auto_flow.called)
+
+    @mock.patch.object(base, 'DynamicLogListener')
+    @mock.patch.object(host_failure, 'get_auto_flow')
+    @mock.patch.object(host_failure, 'get_rh_flow')
     def test_complete_rh_priority_recovery_flow_failure(
         self, mock_rh_flow, mock_auto_flow, mock_listener):
 

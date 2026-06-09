@@ -41,9 +41,13 @@ LOG = logging.getLogger(__name__)
 
 NOVA_API_VERSION = "2.53"
 
-nova_extensions = [ext for ext in
-                   nova_client.discover_extensions(NOVA_API_VERSION)
-                   if ext.name in ("list_extensions",)]
+
+def _discover_extensions(api_version):
+    return [ext for ext in nova_client.discover_extensions(api_version)
+            if ext.name in ("list_extensions",)]
+
+
+nova_extensions = _discover_extensions(NOVA_API_VERSION)
 
 
 def _reraise(desired_exc):
@@ -79,7 +83,7 @@ def translate_nova_exception(method):
     return wrapper
 
 
-def novaclient(context, timeout=None):
+def novaclient(context, timeout=None, api_version=NOVA_API_VERSION):
     """Returns a Nova client
 
     @param timeout: Number of seconds to wait for an answer before raising a
@@ -119,8 +123,11 @@ def novaclient(context, timeout=None):
         auth=auth, cacert=CONF.nova_ca_certificates_file,
         insecure=CONF.nova_api_insecure)
 
+    extensions = (nova_extensions if api_version == NOVA_API_VERSION else
+                  _discover_extensions(api_version))
+
     client_obj = nova_client.Client(
-        api_versions.APIVersion(NOVA_API_VERSION),
+        api_versions.APIVersion(api_version),
         session=keystone_session,
         insecure=CONF.nova_api_insecure,
         timeout=timeout,
@@ -183,6 +190,19 @@ class API(object):
         nova.servers.evacuate(uuid, host=target)
 
     @translate_nova_exception
+    def evacuate_instance_stopped(self, context, uuid, target=None):
+        """Evacuate an instance and leave it stopped on destination host."""
+        api_version = CONF.staged_recovery.nova_evacuate_microversion
+        msg = ('Call evacuate-to-stopped command for instance %(uuid)s on '
+               'host %(target)s using Nova microversion %(api_version)s')
+        LOG.info(msg, {'uuid': uuid, 'target': target,
+                       'api_version': api_version})
+        nova = novaclient(context, api_version=api_version)
+        if target:
+            return nova.servers.evacuate(uuid, host=target)
+        return nova.servers.evacuate(uuid)
+
+    @translate_nova_exception
     def reset_instance_state(self, context, uuid, status='error'):
         """Reset the state of an instance to active or error."""
         msg = ('Call reset state command on instance %(uuid)s to '
@@ -197,6 +217,15 @@ class API(object):
         nova = novaclient(context)
         msg = ('Call get server command for instance %(uuid)s')
         LOG.info(msg, {'uuid': uuid})
+        return nova.servers.get(uuid)
+
+    @translate_nova_exception
+    def get_server_with_microversion(self, context, uuid, api_version):
+        """Get a server using a requested Nova microversion."""
+        nova = novaclient(context, api_version=api_version)
+        msg = ('Call get server command for instance %(uuid)s using Nova '
+               'microversion %(api_version)s')
+        LOG.info(msg, {'uuid': uuid, 'api_version': api_version})
         return nova.servers.get(uuid)
 
     @translate_nova_exception

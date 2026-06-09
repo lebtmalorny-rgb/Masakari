@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Added an etcd-backed staged host failure recovery mode. The new taskflow
+    tasks evacuate instances with Nova microversion 2.95 or newer so they
+    remain stopped on the destination host, then start only originally active
+    instances while enforcing a per-destination-host start limit with etcd TTL
+    leases and Tooz locks.
+  - |
+    Added the ``[staged_recovery]`` configuration group and a staged recovery
+    sample workflow file, ``masakari-staged-recovery-methods.conf``.

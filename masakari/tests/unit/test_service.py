@@ -101,6 +101,21 @@ class ServiceTestCase(test.NoDBTestCase):
         serv.rpcserver.stop.assert_called_once_with()
         mock_stop.assert_called_once_with()
 
+    @mock.patch('masakari.service.masakari_coordination.COORDINATOR')
+    @mock.patch.object(rpc, 'init')
+    @mock.patch.object(rpc, 'get_server')
+    def test_engine_service_starts_coordination_when_configured(
+            self, mock_rpc, mock_rpc_init, mock_coordinator):
+        self.override_config('backend_url', 'etcd3+http://127.0.0.1:2379',
+                             group='coordination')
+        serv = service.Service(
+            self.host, self.binary, self.topic,
+            'masakari.tests.unit.test_service.FakeManager')
+
+        serv.start()
+
+        mock_coordinator.start.assert_called_once_with()
+
     @mock.patch.object(rpc, 'init')
     def test_reset(self, mock_rpc_init):
         serv = service.Service(self.host,

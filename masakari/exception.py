@@ -324,6 +324,10 @@ class HostRecoveryFailureException(MasakariException):
     msg_fmt = _('Failed to execute host recovery.')
 
 
+class StagedStartFailureException(HostRecoveryFailureException):
+    msg_fmt = _('Failed to start staged recovery instances.')
+
+
 class InstanceRecoveryFailureException(MasakariException):
     msg_fmt = _('Failed to execute instance recovery workflow.')
 

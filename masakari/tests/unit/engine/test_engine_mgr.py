@@ -23,6 +23,7 @@ from masakari.compute import nova
 import masakari.conf
 from masakari import context
 from masakari.engine import manager
+from masakari.engine.drivers.taskflow import staged_state_etcd as staged_state
 from masakari.engine import utils as engine_utils
 from masakari import exception
 from masakari.objects import fields
@@ -38,6 +39,14 @@ CONF = masakari.conf.CONF
 NOW = timeutils.utcnow().replace(microsecond=0)
 EXPIRED_TIME = timeutils.utcnow().replace(microsecond=0) \
     - datetime.timedelta(seconds=CONF.notifications_expired_interval)
+
+
+class FakeLock(object):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
 
 
 def _get_vm_type_notification(status="new"):
@@ -1206,3 +1215,36 @@ class EngineManagerUnitTestCase(test.NoDBTestCase):
         mock_get_all.return_value = [notification]
         self.engine._check_expired_notifications(self.context)
         self.assertEqual("failed", notification.status)
+
+    @mock.patch('masakari.engine.manager.coordination.COORDINATOR.get_lock')
+    @mock.patch.object(notification_obj.Notification, "save")
+    def test_process_stale_staged_recovery_marks_running_notification_error(
+            self, mock_save, mock_get_lock, mock_notification_get):
+        self.override_config('enabled', True, group='staged_recovery')
+        self.override_config('stale_recovery_timeout', 300,
+                             group='staged_recovery')
+        fake_store = mock.Mock()
+        fake_store.list_stale_instance_states.return_value = [{
+            'notification_uuid': uuidsentinel.fake_notification,
+            'instance_uuid': uuidsentinel.fake_ins,
+            'step': staged_state.STEP_STARTING,
+        }]
+        notification = self._get_compute_host_type_notification()
+        notification.status = fields.NotificationStatus.RUNNING
+        mock_notification_get.return_value = notification
+        mock_get_lock.return_value = FakeLock()
+
+        with mock.patch.object(self.engine, '_get_staged_recovery_store',
+                               return_value=fake_store):
+            self.engine._process_stale_staged_recoveries(self.context)
+
+        fake_store.list_stale_instance_states.assert_called_once_with(
+            300, [staged_state.STEP_EVACUATING,
+                  staged_state.STEP_WAITING_START_SLOT,
+                  staged_state.STEP_STARTING])
+        mock_get_lock.assert_called_once_with(
+            'staged-recovery-notification-%s' %
+            uuidsentinel.fake_notification)
+        self.assertEqual(fields.NotificationStatus.ERROR,
+                         notification.status)
+        mock_save.assert_called_once()

@@ -85,6 +85,9 @@ class TaskFlowDriver(driver.NotificationDriver):
                 if isinstance(ex, exception.SkipHostRecoveryException):
                     ctxt.reraise = True
                     return
+                if isinstance(ex, exception.StagedStartFailureException):
+                    ctxt.reraise = True
+                    return
 
                 # Caught generic Exception to make sure that any failure
                 # should lead to execute 'reserved_host' recovery workflow.
@@ -110,6 +113,9 @@ class TaskFlowDriver(driver.NotificationDriver):
         except Exception as ex:
             with excutils.save_and_reraise_exception(reraise=False) as ctxt:
                 if isinstance(ex, exception.SkipHostRecoveryException):
+                    ctxt.reraise = True
+                    return
+                if isinstance(ex, exception.StagedStartFailureException):
                     ctxt.reraise = True
                     return
 

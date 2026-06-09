@@ -88,6 +88,9 @@ class Service(service.Service):
 
         LOG.debug("Creating RPC server for service %s", self.topic)
 
+        if CONF.coordination.backend_url:
+            masakari_coordination.COORDINATOR.start()
+
         target = messaging.Target(topic=self.topic, server=self.host)
         endpoints = [self.manager]
         serializer = objects_base.MasakariObjectSerializer()
@@ -159,6 +162,12 @@ class Service(service.Service):
         self.stop()
 
     def stop(self):
+        if CONF.coordination.backend_url:
+            try:
+                masakari_coordination.COORDINATOR.stop()
+            except Exception as error:
+                LOG.warning('Error occurred during masakari coordination was '
+                            'stopped: %s', error)
         # Try to shut the connection down, but if we get any sort of
         # errors, go ahead and ignore them.. as we're shutting down anyway
         try:

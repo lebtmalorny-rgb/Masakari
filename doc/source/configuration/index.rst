@@ -26,6 +26,9 @@ Masakari has two main config files:
    * :doc:`Sample recovery workflow File <recovery_workflow_sample_config>`: A
      complete reference of defining the monitoring processes.
 
+* :doc:`Staged Recovery <staged_recovery>`: Operator guide for etcd-backed
+  staged VM start after host failure recovery.
+
 Policy
 ------
 

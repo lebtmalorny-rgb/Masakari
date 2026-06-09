@@ -29,7 +29,9 @@ from oslo_service import periodic_task
 from oslo_utils import timeutils
 
 import masakari.conf
+from masakari import coordination
 from masakari.engine import driver
+from masakari.engine.drivers.taskflow import staged_state_etcd as staged_state
 from masakari.engine import instance_events as virt_events
 from masakari.engine import rpcapi
 from masakari.engine import utils as engine_utils
@@ -349,6 +351,60 @@ class MasakariManager(manager.Manager):
             raise exception.FailoverSegmentDisabled(msg)
 
         self._process_notification(context, notification)
+
+    def _get_staged_recovery_store(self):
+        return staged_state.EtcdStagedRecoveryStore(
+            CONF, owner='engine-manager-%s' % id(self))
+
+    @periodic_task.periodic_task(
+        spacing=CONF.staged_recovery.reconcile_interval)
+    def _process_stale_staged_recoveries(self, context):
+        if not CONF.staged_recovery.enabled:
+            return
+
+        steps = [staged_state.STEP_EVACUATING,
+                 staged_state.STEP_WAITING_START_SLOT,
+                 staged_state.STEP_STARTING]
+        try:
+            store = self._get_staged_recovery_store()
+            stale_states = store.list_stale_instance_states(
+                CONF.staged_recovery.stale_recovery_timeout, steps)
+        except Exception:
+            LOG.warning('Failed to list stale staged recovery states.',
+                        exc_info=True)
+            return
+
+        notification_uuids = sorted({
+            state.get('notification_uuid') for state in stale_states
+            if state.get('notification_uuid')})
+
+        for notification_uuid in notification_uuids:
+            lock_name = 'staged-recovery-notification-%s' % notification_uuid
+            lock = coordination.COORDINATOR.get_lock(lock_name)
+            if lock is None:
+                LOG.warning('Cannot reconcile stale staged recovery '
+                            'notification %s because coordination lock is '
+                            'unavailable.', notification_uuid)
+                continue
+
+            try:
+                with lock:
+                    notification = objects.Notification.get_by_uuid(
+                        context, notification_uuid)
+                    if (notification.status !=
+                            fields.NotificationStatus.RUNNING):
+                        continue
+                    notification.update({
+                        'status': fields.NotificationStatus.ERROR
+                    })
+                    notification.save()
+                    LOG.error('Staged recovery notification %s was marked '
+                              'ERROR because etcd state is stale.',
+                              notification_uuid)
+            except Exception:
+                LOG.warning('Failed to reconcile stale staged recovery '
+                            'notification %s.', notification_uuid,
+                            exc_info=True)
 
     @periodic_task.periodic_task(
         spacing=CONF.process_unfinished_notifications_interval)
