@@ -10,6 +10,33 @@ evacuated servers remain stopped until Masakari starts them.
 Staged recovery is disabled by default. To use it, configure the staged task
 flow and enable the ``[staged_recovery]`` options.
 
+Implemented Components
+----------------------
+
+The staged recovery implementation adds these components to Masakari:
+
+* A ``[staged_recovery]`` configuration group for enabling staged recovery,
+  selecting etcd state storage, tuning per-host start concurrency, selecting
+  the Nova evacuation microversion, and configuring stale recovery
+  reconciliation.
+* Nova wrapper methods that can use a dedicated microversion for
+  evacuate-to-stopped behavior without changing the default Nova client
+  microversion used by existing Masakari workflows.
+* Three TaskFlow tasks registered through ``masakari.task_flow.tasks``:
+  ``reconcile_staged_recovery_task``, ``evacuate_to_stopped_task``, and
+  ``batched_start_instances_task``.
+* An etcd state store for idempotent per-instance staged recovery state and
+  per-destination-host start lease keys.
+* A start limiter that combines a short Tooz lock with etcd TTL leases. The
+  lock protects only slot allocation; the TTL lease represents the long-running
+  start slot.
+* A manager periodic task that detects stale in-progress staged recovery state
+  and marks the matching running notification ``ERROR`` so normal unfinished
+  notification processing can retry it.
+* A separate staged workflow sample file,
+  ``etc/masakari/masakari-staged-recovery-methods.conf``. The default recovery
+  workflow file is unchanged.
+
 Required Configuration
 ----------------------
 
@@ -78,3 +105,96 @@ in-progress staged recovery that has not been updated for
 marked ``ERROR`` under a distributed lock. Existing unfinished notification
 processing can then retry the workflow and continue from the persisted etcd
 state.
+
+Internal Python APIs and Entry Points
+-------------------------------------
+
+The staged recovery feature does not add a new REST API. It adds internal
+Python APIs and TaskFlow entry points intended for Masakari engine code and
+operator-selected recovery flows.
+
+Nova wrapper
+~~~~~~~~~~~~
+
+``masakari.compute.nova.novaclient(context, timeout=None, api_version='2.53')``
+    Creates a Nova client for the requested microversion. Existing callers use
+    the default ``2.53`` value. Staged recovery passes
+    ``[staged_recovery] nova_evacuate_microversion`` when it needs Nova's
+    evacuate-to-stopped behavior.
+
+``masakari.compute.nova.API.evacuate_instance_stopped(context, uuid, target=None)``
+    Evacuates a server using the staged recovery Nova microversion. If
+    ``target`` is ``None``, no destination host is passed and Nova scheduler
+    selects the target host. If ``target`` is set, it is passed as ``host`` for
+    reserved-host recovery. The method does not use ``force=True``.
+
+``masakari.compute.nova.API.get_server_with_microversion(context, uuid, api_version)``
+    Fetches a server using a caller-selected Nova microversion. This is a small
+    helper for code that needs to inspect Nova state with a non-default
+    microversion.
+
+TaskFlow entry points
+~~~~~~~~~~~~~~~~~~~~~
+
+``reconcile_staged_recovery_task``
+    Maps to ``ReconcileStagedRecoveryTask``. It reads ``VMove`` records and Nova
+    server state, then creates or updates etcd instance state. It is safe to run
+    on retry because it uses create-or-get semantics and does not overwrite the
+    original VM state.
+
+``evacuate_to_stopped_task``
+    Maps to ``EvacuateToStoppedTask``. It processes pending and ongoing
+    ``VMove`` records, locks instances while evacuating, calls
+    ``evacuate_instance_stopped()``, records the destination host, and marks the
+    etcd state ``EVACUATED_STOPPED`` or ``ACTIVE``.
+
+``batched_start_instances_task``
+    Maps to ``BatchedStartInstancesTask``. It starts only candidates whose etcd
+    state is ``EVACUATED_STOPPED`` and whose original VM state was ``active``
+    when ``start_only_originally_active`` is true. It holds a start slot until
+    the server becomes ``ACTIVE``, goes ``ERROR``, or the configured timeout is
+    reached.
+
+etcd state store
+~~~~~~~~~~~~~~~~
+
+``EtcdStagedRecoveryStore``
+    Owns staged recovery state under ``[staged_recovery] etcd_prefix``. The
+    main instance-state methods are ``create_or_get_instance_state()``,
+    ``get_instance_state()``, ``list_instance_states()``,
+    ``list_stale_instance_states()``, ``update_instance_state()``,
+    ``transition_instance_state()``, and ``mark_failed()``.
+
+    The start-lease methods are ``list_start_leases()``,
+    ``create_start_lease()``, ``refresh_start_lease()``, and
+    ``release_start_lease()``. Lease keys are stored under
+    ``<etcd_prefix>/start-leases/<encoded_dest_host>/<instance_uuid>`` and are
+    attached to etcd TTL leases.
+
+``encode_key_part(value)`` and ``decode_key_part(value)``
+    Encode etcd key path components so host names and UUID-like values cannot
+    break the key layout.
+
+Start limiter
+~~~~~~~~~~~~~
+
+``EtcdStartLimiter.acquire(notification_uuid, instance_uuid, dest_host)``
+    Acquires a start slot for a destination host. It first obtains the Tooz lock
+    ``staged-start-lock-<dest_host>``, counts live etcd start leases, creates a
+    new TTL lease key when capacity is available, releases the lock, and returns
+    a ``StartSlot`` object. If coordination is unavailable, it raises a
+    Masakari exception instead of allowing unbounded starts.
+
+``EtcdStartLimiter.release(slot)``
+    Deletes the start lease key and revokes the associated etcd lease.
+
+Manager reconciliation
+~~~~~~~~~~~~~~~~~~~~~~
+
+``MasakariManager._process_stale_staged_recoveries(context)``
+    Periodically scans etcd for stale ``EVACUATING``,
+    ``WAITING_START_SLOT``, and ``STARTING`` states. For each affected
+    notification it acquires ``staged-recovery-notification-<uuid>`` and marks
+    a still-running notification ``ERROR``. This deliberately does not start a
+    second workflow directly; it lets existing unfinished notification handling
+    retry the idempotent staged tasks.
