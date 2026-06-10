@@ -101,6 +101,14 @@ class MigrationsWalk(
             for revision_script in revisions:
                 self._migrate_up(revision_script.revision, connection)
 
+    def _check_9f33c2d21f7a(self, connection):
+        self.assertTrue(connection.dialect.has_table(
+            connection, 'admin_config_drafts'))
+        indexes = connection.dialect.get_indexes(
+            connection, 'admin_config_drafts')
+        self.assertIn('admin_config_drafts_status_idx',
+                      [index['name'] for index in indexes])
+
 
 class TestMigrationsWalkSQLite(
     MigrationsWalk,

@@ -163,3 +163,21 @@ class VMove(BASE, MasakariAPIBase, models.SoftDeleteMixin):
     type = Column(String(36), nullable=True)
     status = Column(String(255), nullable=True)
     message = Column(Text)
+
+
+class AdminConfigDraft(BASE, MasakariAPIBase, models.SoftDeleteMixin):
+    """Represents one admin configuration draft."""
+    __tablename__ = 'admin_config_drafts'
+    __table_args__ = (
+        schema.UniqueConstraint('uuid', name='uniq_admin_config_draft0uuid'),
+        Index('admin_config_drafts_status_idx', 'status'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uuid = Column(String(36), nullable=False)
+    name = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False)
+    values = Column(Text, nullable=False)
+    comment = Column(Text, nullable=True)
+    validation = Column(Text, nullable=True)
+    plan = Column(Text, nullable=True)

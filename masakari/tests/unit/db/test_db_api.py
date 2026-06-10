@@ -619,3 +619,80 @@ class VMoveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertRaises(exception.InvalidSortKey,
                           db.vmoves_get_all_by_filters,
                           context=self.ctxt, sort_keys=['invalid_sort_key'])
+
+
+class AdminConfigDraftTestCase(test.TestCase, ModelsObjectComparatorMixin):
+
+    def setUp(self):
+        super(AdminConfigDraftTestCase, self).setUp()
+        self.ctxt = context.get_admin_context()
+
+    def _get_fake_values(self):
+        return {
+            'uuid': uuidsentinel.admin_config_draft,
+            'name': 'draft-1',
+            'status': 'draft',
+            'values': ('{"staged_recovery": '
+                       '{"max_parallel_starts_per_host": 3}}'),
+            'comment': 'test draft',
+            'validation': None,
+            'plan': None,
+        }
+
+    def _create_draft(self, values=None):
+        return db.admin_config_draft_create(
+            self.ctxt, values or self._get_fake_values())
+
+    def test_admin_config_draft_create(self):
+        draft = self._create_draft()
+
+        self.assertIsNotNone(draft['id'])
+        ignored_keys = ['deleted', 'created_at', 'updated_at', 'deleted_at',
+                        'id']
+        self._assertEqualObjects(draft, self._get_fake_values(),
+                                 ignored_keys)
+
+    def test_admin_config_draft_get_by_uuid(self):
+        draft = self._create_draft()
+
+        result = db.admin_config_draft_get_by_uuid(self.ctxt, draft['uuid'])
+
+        self._assertEqualObjects(draft, result)
+
+    def test_admin_config_draft_get_all(self):
+        first = self._create_draft()
+        second = self._create_draft({
+            'uuid': uuidsentinel.admin_config_draft_2,
+            'name': 'draft-2',
+            'status': 'valid',
+            'values': '{"staged_recovery": {"batch_delay": 10}}',
+            'comment': None,
+            'validation': '{"status": "valid"}',
+            'plan': None,
+        })
+
+        drafts = db.admin_config_draft_get_all(
+            self.ctxt, sort_keys=['id'], sort_dirs=['asc'])
+
+        self.assertEqual(2, len(drafts))
+        self._assertEqualObjects(first, drafts[0])
+        self._assertEqualObjects(second, drafts[1])
+
+    def test_admin_config_draft_update(self):
+        draft = self._create_draft()
+
+        updated = db.admin_config_draft_update(
+            self.ctxt, draft['uuid'],
+            {'status': 'valid', 'validation': '{"status": "valid"}'})
+
+        self.assertEqual('valid', updated['status'])
+        self.assertEqual('{"status": "valid"}', updated['validation'])
+
+    def test_admin_config_draft_delete(self):
+        draft = self._create_draft()
+
+        db.admin_config_draft_delete(self.ctxt, draft['uuid'])
+
+        self.assertRaises(exception.ConfigDraftNotFound,
+                          db.admin_config_draft_get_by_uuid, self.ctxt,
+                          draft['uuid'])

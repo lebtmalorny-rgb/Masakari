@@ -441,6 +441,35 @@ def vmove_delete(context, uuid):
     return IMPL.vmove_delete(context, uuid)
 
 
+def admin_config_draft_create(context, values):
+    """Create an admin config draft."""
+    return IMPL.admin_config_draft_create(context, values)
+
+
+def admin_config_draft_get_by_uuid(context, draft_uuid):
+    """Get an admin config draft by uuid."""
+    return IMPL.admin_config_draft_get_by_uuid(context, draft_uuid)
+
+
+def admin_config_draft_get_all(context, filters=None, sort_keys=None,
+                               sort_dirs=None, limit=None, marker=None):
+    """Get admin config drafts."""
+    return IMPL.admin_config_draft_get_all(context, filters=filters,
+                                           sort_keys=sort_keys,
+                                           sort_dirs=sort_dirs, limit=limit,
+                                           marker=marker)
+
+
+def admin_config_draft_update(context, draft_uuid, values):
+    """Update an admin config draft by uuid."""
+    return IMPL.admin_config_draft_update(context, draft_uuid, values)
+
+
+def admin_config_draft_delete(context, draft_uuid):
+    """Delete an admin config draft."""
+    return IMPL.admin_config_draft_delete(context, draft_uuid)
+
+
 def purge_deleted_rows(context, age_in_days, max_rows):
     """Purge the soft deleted rows.
 

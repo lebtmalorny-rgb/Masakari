@@ -89,3 +89,207 @@ class AdminConfigTestCase(test.TestCase):
         self.assertEqual(HTTPStatus.OK, response.status_code)
         body = jsonutils.loads(response.body)
         self.assertIn('staged_recovery', body['config'])
+
+    def test_create_draft_stores_changes(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+
+        result = self.controller.drafts.create(req, body={
+            'draft': {
+                'name': 'staged-start-limit',
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                },
+                'comment': 'raise runtime start limit'
+            }
+        })
+
+        self.assertEqual('staged-start-limit', result['draft']['name'])
+        self.assertEqual('draft', result['draft']['status'])
+        self.assertEqual(4, result['draft']['changes']['staged_recovery'][
+            'max_parallel_starts_per_host'])
+
+    def test_create_draft_rejects_non_object_draft_body(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+
+        self.assertRaises(exc.HTTPBadRequest,
+                          self.controller.drafts.create, req,
+                          body={'draft': 'bad'})
+
+    def test_validate_draft_marks_invalid_option(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'does_not_exist': 1
+                    }
+                }
+            }
+        })
+
+        result = self.controller.drafts.validate(
+            req, created['draft']['uuid'])
+
+        self.assertEqual('invalid', result['validation']['status'])
+        self.assertEqual('unknown_option',
+                         result['validation']['errors'][0]['code'])
+
+    def test_validate_draft_accepts_list_changes(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': [
+                    {
+                        'file': 'masakari.conf',
+                        'group': 'staged_recovery',
+                        'option': 'max_parallel_starts_per_host',
+                        'value': 4,
+                    }
+                ]
+            }
+        })
+
+        validation = self.controller.drafts.validate(
+            req, created['draft']['uuid'])
+        diff = self.controller.drafts.diff(req, created['draft']['uuid'])
+        plan = self.controller.drafts.plan(req, created['draft']['uuid'])
+
+        self.assertEqual('valid', validation['validation']['status'])
+        self.assertEqual('masakari.conf',
+                         diff['diff']['changes'][0]['file'])
+        self.assertEqual('masakari.conf', plan['plan']['steps'][0]['file'])
+
+    def test_validate_draft_reports_malformed_changes(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': 'not-a-change-set'
+            }
+        })
+
+        validation = self.controller.drafts.validate(
+            req, created['draft']['uuid'])
+        diff = self.controller.drafts.diff(req, created['draft']['uuid'])
+        plan = self.controller.drafts.plan(req, created['draft']['uuid'])
+
+        self.assertEqual('invalid', validation['validation']['status'])
+        self.assertEqual('invalid_changes',
+                         validation['validation']['errors'][0]['code'])
+        self.assertFalse(diff['diff']['changes'][0]['valid'])
+        self.assertEqual('invalid', plan['plan']['status'])
+
+    def test_update_draft_replaces_changes_and_clears_cached_results(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'does_not_exist': 1
+                    }
+                }
+            }
+        })
+        self.controller.drafts.validate(req, created['draft']['uuid'])
+
+        updated = self.controller.drafts.update(req, created['draft']['uuid'],
+                                                body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        self.assertEqual('draft', updated['draft']['status'])
+        self.assertNotIn('validation', updated['draft'])
+        self.assertEqual(4, updated['draft']['changes']['staged_recovery'][
+            'max_parallel_starts_per_host'])
+
+    def test_diff_draft_masks_secret_values(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        self.override_config('etcd_key_file', '/etc/masakari/old.pem',
+                             group='staged_recovery')
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'etcd_key_file': '/etc/masakari/new.pem'
+                    }
+                }
+            }
+        })
+
+        result = self.controller.drafts.diff(req, created['draft']['uuid'])
+
+        change = result['diff']['changes'][0]
+        self.assertEqual('etcd_key_file', change['option'])
+        self.assertEqual({'masked': True, 'configured': True},
+                         change['current'])
+        self.assertEqual({'masked': True, 'configured': True},
+                         change['proposed'])
+
+    def test_plan_draft_marks_runtime_and_reconfigure_steps(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4,
+                        'batch_delay': 20
+                    }
+                }
+            }
+        })
+
+        result = self.controller.drafts.plan(req, created['draft']['uuid'])
+
+        actions = {(step['group'], step['option']): step['action']
+                   for step in result['plan']['steps']}
+        self.assertEqual('runtime_update', actions[
+            ('staged_recovery', 'max_parallel_starts_per_host')])
+        self.assertEqual('reconfigure_required', actions[
+            ('staged_recovery', 'batch_delay')])
+
+    @mock.patch('masakari.ha.api.NotificationAPI')
+    def test_draft_routes(self, mock_notification_api):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        req.method = 'POST'
+        req.headers['Content-Type'] = 'application/json'
+        req.body = jsonutils.dump_as_bytes({
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        response = req.get_response(self.app)
+
+        self.assertEqual(HTTPStatus.CREATED, response.status_code)
+        body = jsonutils.loads(response.body)
+        draft_uuid = body['draft']['uuid']
+
+        validate_req = fakes.HTTPRequest.blank(
+            '/v1/admin-config-drafts/%s/validate' % draft_uuid,
+            use_admin_context=True)
+        validate_req.method = 'POST'
+        validate_req.headers['Content-Type'] = 'application/json'
+        validate_req.body = jsonutils.dump_as_bytes({})
+        validate_response = validate_req.get_response(self.app)
+
+        self.assertEqual(HTTPStatus.OK, validate_response.status_code)

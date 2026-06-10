@@ -208,6 +208,10 @@ class ConfigNotFound(NotFound):
     msg_fmt = _("Could not find config at %(path)s")
 
 
+class ConfigDraftNotFound(NotFound):
+    msg_fmt = _("Could not find config draft %(draft_id)s")
+
+
 class Forbidden(MasakariException):
     msg_fmt = _("Forbidden")
     code = HTTPStatus.FORBIDDEN

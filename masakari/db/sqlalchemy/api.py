@@ -740,6 +740,86 @@ def vmove_delete(context, vmove_uuid):
         raise exception.VMoveNotFound(id=vmove_uuid)
 
 
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.writer
+def admin_config_draft_create(context, values):
+    draft = models.AdminConfigDraft()
+    draft.update(values)
+
+    draft.save(session=context.session)
+
+    return _admin_config_draft_get_by_uuid(context, draft.uuid)
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.reader
+def admin_config_draft_get_by_uuid(context, draft_uuid):
+    return _admin_config_draft_get_by_uuid(context, draft_uuid)
+
+
+def _admin_config_draft_get_by_uuid(context, draft_uuid):
+    query = model_query(
+        context, models.AdminConfigDraft).filter_by(uuid=draft_uuid)
+
+    result = query.first()
+    if not result:
+        raise exception.ConfigDraftNotFound(draft_id=draft_uuid)
+
+    return result
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.reader
+def admin_config_draft_get_all(context, filters=None, sort_keys=None,
+                               sort_dirs=None, limit=None, marker=None):
+    if limit == 0:
+        return []
+
+    sort_keys, sort_dirs = _process_sort_params(sort_keys, sort_dirs)
+    filters = filters or {}
+    query = model_query(context, models.AdminConfigDraft)
+
+    if 'status' in filters:
+        query = query.filter(models.AdminConfigDraft.status == filters[
+            'status'])
+
+    marker_row = None
+    if marker is not None:
+        marker_row = model_query(
+            context, models.AdminConfigDraft).filter_by(id=marker).first()
+        if not marker_row:
+            raise exception.MarkerNotFound(marker=marker)
+
+    try:
+        query = sqlalchemyutils.paginate_query(
+            query, models.AdminConfigDraft, limit, sort_keys,
+            marker=marker_row, sort_dirs=sort_dirs)
+    except db_exc.InvalidSortKey as err:
+        raise exception.InvalidSortKey(err)
+
+    return query.all()
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.writer
+def admin_config_draft_update(context, draft_uuid, values):
+    draft = _admin_config_draft_get_by_uuid(context, draft_uuid)
+    draft.update(values)
+    draft.save(session=context.session)
+    return _admin_config_draft_get_by_uuid(context, draft.uuid)
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.writer
+def admin_config_draft_delete(context, draft_uuid):
+    count = model_query(context, models.AdminConfigDraft
+                        ).filter_by(uuid=draft_uuid
+                                    ).soft_delete(synchronize_session=False)
+
+    if count == 0:
+        raise exception.ConfigDraftNotFound(draft_id=draft_uuid)
+
+
 class DeleteFromSelect(sa_sql.expression.UpdateBase):
     inherit_cache = False
 
