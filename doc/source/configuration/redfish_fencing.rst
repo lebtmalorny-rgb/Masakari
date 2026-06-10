@@ -123,6 +123,90 @@ For each host, the Redfish client performs this sequence:
 
 7. Persist proof in etcd and allow the workflow to continue.
 
+BMC Algorithm
+-------------
+
+The BMC part of the workflow is intentionally small and fail-closed. It is not
+a general power-management integration. It performs only the operations needed
+to prove that the failed compute host cannot continue running instances.
+
+For each host in the failure set:
+
+1. Load the host mapping by Nova/Masakari host name.
+2. Read the BMC password from ``password_file`` or, only when explicitly
+   allowed for lab use, from inline ``password``.
+3. Open a Redfish session or configure basic authentication.
+4. Read the configured ``systems_uri``.
+5. Validate all configured identity guards before any power operation.
+6. Read the reset action target and allowed reset types from
+   ``Actions.#ComputerSystem.Reset``.
+7. Reject the host if ``ForceOff`` is not in
+   ``ResetType@Redfish.AllowableValues`` when that list is provided.
+8. If ``PowerState`` is already ``Off``, skip the reset request and continue
+   to stable-read verification.
+9. If ``PowerState`` is not ``Off``, send ``{"ResetType": "ForceOff"}`` to
+   the reset target.
+10. Poll ``systems_uri`` until ``PowerState = Off`` is observed for
+    ``stable_power_state_reads`` consecutive reads.
+11. Return proof to the TaskFlow task.
+12. Delete the Redfish session when session authentication was used.
+
+The proof returned by the BMC algorithm is not enough by itself. The TaskFlow
+task must persist it in etcd and the later gate task must read it back before
+evacuation can proceed.
+
+The BMC algorithm must not be used as a liveness detector for controller
+services. It is a last-step isolation action for compute hosts that Masakari has
+already selected for host failure recovery.
+
+Backend / etcd State Algorithm
+------------------------------
+
+The backend part of the workflow owns three things:
+
+* failure-set records;
+* distributed locks;
+* durable fencing proof.
+
+The backend algorithm is:
+
+1. ``collect_fencing_failure_set_task`` asserts that the Redfish fencing
+   backend is available.
+2. It writes a failure record under
+   ``<prefix>/failures/<segment_uuid>/<event_id>/<hostname>``.
+3. It creates or resets the host state under ``<prefix>/hosts/<hostname>`` to
+   ``FENCE_REQUIRED``.
+4. It lists recent failure records for the same segment. If
+   ``multi_host_batch_window = 0``, only records with the same ``event_id`` are
+   grouped. Otherwise, records inside the configured time window are grouped.
+5. It validates the failure-set size against
+   ``max_auto_fence_hosts_per_segment``.
+6. It validates that enough non-failed compute hosts remain according to
+   ``min_surviving_compute_hosts``.
+7. ``redfish_fence_failure_set_task`` acquires a segment recovery lock under
+   ``<prefix>/locks/segments/<segment_uuid>``.
+8. For each host, it acquires a host fencing lock under
+   ``<prefix>/locks/hosts/<hostname>``.
+9. It transitions host state from ``FENCE_REQUIRED`` to ``FENCING`` with
+   compare-and-replace semantics.
+10. It runs the BMC algorithm.
+11. It writes the BMC proof and transitions the host state to ``FENCED``.
+12. If the BMC algorithm fails, it transitions the host state to
+    ``FENCE_FAILED`` and raises an error.
+13. It releases host locks and the segment lock. If an engine dies, etcd TTL
+    leases eventually remove the lock keys.
+14. ``assert_failure_set_fenced_task`` reads host states back from etcd and
+    accepts only ``state = FENCED`` with ``verified_power_state = Off``.
+
+This is why the feature fails closed when etcd is unavailable. Without the
+backend, Masakari cannot coordinate concurrent engines or persist fencing
+proof, so it must not send Redfish power operations and then evacuate blindly.
+
+The backend is also the retry boundary. If an engine powers off a host but dies
+before writing ``FENCED``, a later retry reads the BMC state again. If the BMC
+now reports stable ``PowerState = Off``, the retry can persist proof and
+continue. If proof cannot be persisted, evacuation stays blocked.
+
 Configuration
 -------------
 
@@ -338,6 +422,161 @@ The host state moves through:
 
 The gate task accepts only records with ``state = FENCED`` and
 ``verified_power_state = Off``.
+
+Multiple Failed Nodes
+---------------------
+
+Masakari can receive several host failure notifications close together. Redfish
+fencing handles this as a failure set for one failover segment.
+
+Single compute failure
+~~~~~~~~~~~~~~~~~~~~~~
+
+For one failed compute host:
+
+1. The failure set contains only that host.
+2. The host is disabled in Nova.
+3. The host is fenced through Redfish.
+4. The gate verifies one ``FENCED`` proof record.
+5. Staged evacuation starts.
+
+This is the default and safest rollout mode. Keep
+``max_auto_fence_hosts_per_segment = 1`` until this path is proven in the
+target cloud.
+
+Multiple compute failures in one segment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For multiple failed compute hosts in the same segment:
+
+1. Each notification writes a failure record in etcd.
+2. ``collect_fencing_failure_set_task`` groups recent failures according to
+   ``multi_host_batch_window`` and ``event_id``.
+3. The grouped set is sorted and deduplicated.
+4. If the set size is greater than ``max_auto_fence_hosts_per_segment``, the
+   workflow stops before BMC power operations.
+5. If the number of non-failed compute hosts is lower than
+   ``min_surviving_compute_hosts``, the workflow stops before BMC power
+   operations.
+6. If both safety checks pass, the task acquires one segment lock and then one
+   host lock per host.
+7. Redfish fencing runs for every host in the set.
+8. Evacuation starts only when every host has valid ``FENCED`` proof.
+
+If any host in the set fails identity validation, Redfish authentication, reset,
+or stable ``PowerState = Off`` verification, that host is marked
+``FENCE_FAILED`` and the whole failure-set evacuation is blocked. This is
+intentional. Evacuating instances from only part of a suspected multi-host
+failure can still create split-brain risk for the unverified hosts.
+
+Concurrent notifications
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The segment lock prevents two engines from fencing or evacuating the same
+segment failure set at the same time. Host locks prevent concurrent Redfish
+operations against the same BMC.
+
+If two notifications race:
+
+* one engine obtains the segment lock and proceeds;
+* another engine sees the lock and fails the workflow for that attempt;
+* normal notification retry can run again after the lock is released or its TTL
+  expires;
+* existing ``FENCED`` proof is reused on retry after it is verified.
+
+The locks are TTL-backed because the recovery path can be interrupted by an
+engine process or controller failure. A retry after TTL expiry must still read
+and validate host state; lock expiry alone is never treated as fencing proof.
+
+Control-Plane Node Failures
+---------------------------
+
+The Redfish fencing gate is scoped to Masakari host failure recovery for
+compute hosts. It does not replace the HA design for OpenStack controller
+services such as Keystone, Nova API, the database, RabbitMQ, HAProxy, or etcd.
+
+Control node failed, quorum remains
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If a control-plane node fails but the required services remain available
+through the remaining controllers, recovery can continue:
+
+* another ``masakari-engine`` service can process or retry the notification;
+* etcd locks and state remain usable if etcd quorum is intact;
+* Nova service disable and evacuation calls can continue if Nova API and
+  Keystone remain reachable;
+* a lock left by the failed engine expires after ``lock_ttl``.
+
+In this case the algorithm is the same as a normal compute-host recovery. The
+important requirement is that the surviving control plane can still serve
+Masakari's dependencies.
+
+Control node failed, backend unavailable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If the failed control-plane node makes etcd unavailable, or if etcd quorum is
+lost, the fencing workflow fails closed before Redfish power operations. The
+engine cannot safely coordinate locks or persist proof.
+
+Expected behavior:
+
+* ``collect_fencing_failure_set_task`` or ``redfish_fence_failure_set_task``
+  raises an error while checking or writing backend state;
+* no valid ``FENCED`` proof is created;
+* ``assert_failure_set_fenced_task`` cannot pass;
+* Nova evacuation does not start.
+
+The operator must restore etcd quorum or point Masakari to a healthy etcd
+backend before retrying recovery.
+
+Control node failed, Nova or Keystone unavailable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If Nova API or Keystone is unavailable, the workflow also cannot complete:
+
+* Nova service disable may fail before fencing starts;
+* evacuation cannot start even if an earlier retry already fenced the host;
+* persisted ``FENCED`` proof remains in etcd and can be reused after the
+  control plane recovers.
+
+This can produce a state where the failed compute host has been powered off,
+but evacuation has not completed yet. That is safer than evacuating without
+proof. After Nova and Keystone recover, retry the notification or let normal
+unfinished-notification processing continue.
+
+Control node is also a compute host
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Some small deployments place compute workloads on nodes that also run control
+services. Masakari should fence such a node only if all of these are true:
+
+* the node is registered in the Masakari segment as a host that should be
+  recovered;
+* its host name has a Redfish mapping;
+* the remaining control plane can still provide etcd, Nova, Keystone, database,
+  and messaging services;
+* ``min_surviving_compute_hosts`` and
+  ``max_auto_fence_hosts_per_segment`` allow the failure set.
+
+If fencing that node would remove the last healthy controller, the operator
+should not allow automatic fencing. Keep controller quorum and service topology
+outside the Redfish fencing task's assumptions; encode the desired safety
+margin with segment design, host mappings, and conservative fencing limits.
+
+Recommended control-plane policy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use these policy rules for production:
+
+* Do not put pure control-plane nodes in ``redfish-fencing-hosts.yaml`` unless
+  there is a separate, reviewed operational reason.
+* Keep etcd for fencing state highly available and independent enough that one
+  controller loss does not remove quorum.
+* Start with ``max_auto_fence_hosts_per_segment = 1``.
+* Set ``min_surviving_compute_hosts`` high enough to prevent evacuating into an
+  undersized or partially failed segment.
+* For converged controller-compute nodes, test the exact failure mode in a lab
+  before enabling automatic Redfish fencing.
 
 Verification
 ------------
