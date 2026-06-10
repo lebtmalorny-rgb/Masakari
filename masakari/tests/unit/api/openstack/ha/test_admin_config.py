@@ -278,7 +278,7 @@ class AdminConfigTestCase(test.TestCase):
         self.assertEqual('reconfigure_required', actions[
             ('staged_recovery', 'batch_delay')])
 
-    def test_apply_draft_creates_succeeded_noop_job(self):
+    def test_apply_reconfigure_draft_is_rejected(self):
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
                                       use_admin_context=True)
         created = self.controller.drafts.create(req, body={
@@ -291,27 +291,19 @@ class AdminConfigTestCase(test.TestCase):
             }
         })
 
-        result = self.controller.drafts.apply(req, created['draft']['uuid'],
-                                              body={
-            'apply': {
-                'strategy': 'rolling',
-                'canary': True,
-                'comment': 'dry run from Horizon'
-            }
-        })
+        self.assertRaises(exc.HTTPConflict, self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={
+                              'apply': {
+                                  'strategy': 'rolling',
+                                  'canary': True,
+                                  'comment': 'dry run from Horizon'
+                              }
+                          })
 
-        job = result['apply_job']
-        self.assertEqual(created['draft']['uuid'], job['draft_id'])
-        self.assertEqual('succeeded', job['status'])
-        self.assertEqual('rolling', job['strategy'])
-        self.assertTrue(job['canary'])
-        self.assertEqual('noop', job['result']['backend'])
-        self.assertFalse(job['result']['changed'])
-
-        stored = self.controller.apply_jobs.show(req, job['id'])
-        self.assertEqual(job['id'], stored['apply_job']['id'])
+        index = self.controller.apply_jobs.index(req)
+        self.assertEqual([], index['apply_jobs'])
         draft = self.controller.drafts.show(req, created['draft']['uuid'])
-        self.assertEqual('applied', draft['draft']['status'])
+        self.assertEqual('draft', draft['draft']['status'])
 
     @mock.patch('masakari.api.openstack.ha.admin_config.'
                 'staged_state.EtcdStagedRecoveryStore')
@@ -337,6 +329,7 @@ class AdminConfigTestCase(test.TestCase):
         store.set_max_parallel_starts_per_host.assert_called_once_with(4)
         job = result['apply_job']
         self.assertEqual('succeeded', job['status'])
+        self.assertEqual('runtime', job['strategy'])
         self.assertEqual('runtime_etcd', job['result']['backend'])
         self.assertTrue(job['result']['changed'])
         self.assertEqual([{
@@ -414,7 +407,7 @@ class AdminConfigTestCase(test.TestCase):
 
     @mock.patch('masakari.api.openstack.ha.admin_config.'
                 'staged_state.EtcdStagedRecoveryStore')
-    def test_apply_mixed_draft_keeps_noop_backend(self, mock_store_cls):
+    def test_apply_mixed_draft_is_rejected(self, mock_store_cls):
         store = mock_store_cls.return_value
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
                                       use_admin_context=True)
@@ -429,11 +422,12 @@ class AdminConfigTestCase(test.TestCase):
             }
         })
 
-        result = self.controller.drafts.apply(req, created['draft']['uuid'],
-                                              body={'apply': {}})
+        self.assertRaises(exc.HTTPConflict, self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={'apply': {}})
 
         store.set_max_parallel_starts_per_host.assert_not_called()
-        self.assertEqual('noop', result['apply_job']['result']['backend'])
+        index = self.controller.apply_jobs.index(req)
+        self.assertEqual([], index['apply_jobs'])
 
     def test_apply_draft_rejects_invalid_changes(self):
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
@@ -451,14 +445,18 @@ class AdminConfigTestCase(test.TestCase):
         self.assertRaises(exc.HTTPBadRequest, self.controller.drafts.apply,
                           req, created['draft']['uuid'], body={'apply': {}})
 
-    def test_apply_jobs_index_and_rollback_unsupported(self):
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_jobs_index_and_rollback_unsupported(self, mock_store_cls):
+        store = mock_store_cls.return_value
+        store.set_max_parallel_starts_per_host.return_value = 4
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
                                       use_admin_context=True)
         created = self.controller.drafts.create(req, body={
             'draft': {
                 'changes': {
                     'staged_recovery': {
-                        'batch_delay': 20
+                        'max_parallel_starts_per_host': 4
                     }
                 }
             }

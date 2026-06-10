@@ -40,6 +40,9 @@ RUNTIME_MUTABLE_OPTIONS = {
 }
 
 SUPPORTED_GROUPS = {'staged_recovery'}
+IMMUTABLE_CONFIG_APPLY_MESSAGE = (
+    'Draft contains immutable Masakari configuration changes. Only runtime '
+    'configuration changes are supported by Masakari API apply.')
 
 
 def _option_type(opt):
@@ -464,17 +467,12 @@ class AdminConfigDraftsController(wsgi.Controller):
                 'runtime_updates': updates,
                 'message': 'Runtime configuration was applied to etcd.',
             }
-        return {
-            'status': 'succeeded',
-            'backend': 'noop',
-            'changed': False,
-            'message': ('No-op apply backend recorded the plan without '
-                        'changing configuration.'),
-        }
+        raise exception.InvalidInput(
+            reason=IMMUTABLE_CONFIG_APPLY_MESSAGE)
 
     def _apply_failure_result(self, plan, message):
         backend = ('runtime_etcd' if self._runtime_apply_supported(plan)
-                   else 'noop')
+                   else 'unsupported')
         return {
             'status': 'failed',
             'backend': backend,
@@ -609,7 +607,7 @@ class AdminConfigDraftsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation='Draft validation failed.')
 
         apply_body = _apply_from_body(body)
-        strategy = apply_body.get('strategy') or 'noop'
+        strategy = apply_body.get('strategy') or 'runtime'
         if not isinstance(strategy, str):
             raise exc.HTTPBadRequest(explanation='Apply strategy must be a '
                                      'string.')
@@ -619,6 +617,14 @@ class AdminConfigDraftsController(wsgi.Controller):
                                      'boolean.')
 
         plan = self._build_plan(changes)
+        if not self._runtime_apply_supported(plan):
+            db.admin_config_draft_update(context, draft_id, {
+                'validation': _dumps(validation),
+                'plan': _dumps(plan),
+            })
+            raise exc.HTTPConflict(
+                explanation=IMMUTABLE_CONFIG_APPLY_MESSAGE)
+
         job = db.admin_config_apply_job_create(context, {
             'uuid': uuidutils.generate_uuid(),
             'draft_uuid': draft['uuid'],
@@ -709,7 +715,7 @@ class AdminConfigApplyJobsController(wsgi.Controller):
         context.can(admin_config_policies.ADMIN_CONFIG_APPLY_JOBS % 'rollback')
         self._get(context, job_id)
         raise exc.HTTPConflict(explanation='Rollback is not supported by the '
-                               'no-op apply backend.')
+                               'admin config apply backend.')
 
 
 class AdminConfig(extensions.V1APIExtensionBase):

@@ -17,8 +17,9 @@ Horizon:
 - validation, diff и apply plan для draft;
 - runtime apply для `staged_recovery.max_parallel_starts_per_host` через etcd
   override;
-- no-op apply workflow для draft-ов, которые требуют deployment/reconfigure
-  backend;
+- immutable `masakari.conf` contract: draft-ы с `reconfigure_required`
+  параметрами можно валидировать, смотреть diff/plan, но нельзя применить через
+  Masakari API;
 - просмотр apply jobs;
 - rollback endpoint как явная заглушка с `409 Conflict`;
 - policy rules для всех новых Admin Config endpoints;
@@ -97,7 +98,7 @@ Apply jobs хранятся в SQL DB в таблице `admin_config_apply_jobs
 uuid        - публичный идентификатор apply job;
 draft_uuid  - ссылка на config draft;
 status      - queued / succeeded / failed, сейчас фактически queued -> succeeded/failed;
-strategy    - строка из apply request, по умолчанию noop;
+strategy    - строка из apply request, по умолчанию runtime;
 canary      - boolean-флаг из apply request;
 comment     - комментарий apply request;
 plan        - JSON apply plan, сохраненный на момент apply;
@@ -107,7 +108,7 @@ errors      - JSON массив ошибок.
 
 Для runtime-only draft-а apply job создается и в рамках того же HTTP request
 завершается через backend `runtime_etcd`. Для draft-а с reconfigure-required
-изменениями job завершается через backend `noop`.
+изменениями apply job не создается: API возвращает `409 Conflict`.
 
 ## Policy rules
 
@@ -515,14 +516,15 @@ Response:
 `staged_recovery.max_parallel_starts_per_host`.
 
 `apply_supported=false` для plan с `reconfigure_required` означает, что
-deployment/reconfigure backend еще не реализован. Такие draft-ы можно
-применить только как no-op apply job для проверки UX lifecycle без изменения
-реальной конфигурации.
+соответствующие `masakari.conf` параметры immutable для Masakari API. Такие
+draft-ы нельзя применить через этот endpoint; Horizon должен оставить apply
+action disabled или показать понятную ошибку.
 
 ### POST `/v1/admin-config-drafts/{draft_id}/apply`
 
-Создает apply job. Runtime-only draft применяется через etcd runtime override;
-draft с reconfigure-required изменениями остается no-op.
+Создает apply job только для runtime-only draft-а. Runtime-only draft
+применяется через etcd runtime override; draft с `reconfigure_required`
+изменениями отклоняется как immutable configuration.
 
 Policy:
 
@@ -535,9 +537,9 @@ Request:
 ```json
 {
   "apply": {
-    "strategy": "noop",
+    "strategy": "runtime",
     "canary": false,
-    "comment": "Horizon dry-run apply"
+    "comment": "Horizon runtime apply"
   }
 }
 ```
@@ -545,7 +547,7 @@ Request:
 Поля:
 
 ```text
-strategy - string, optional, default noop; сейчас сохраняется в job;
+strategy - string, optional, default runtime; сейчас сохраняется в job;
 canary   - boolean, optional, default false; сейчас только сохраняется в job;
 comment  - string, optional.
 ```
@@ -558,9 +560,9 @@ Response: `202 Accepted`
     "id": "1281c9c3-b6cc-4397-b04d-6b31a4a6d487",
     "draft_id": "6ac7b8d6-6f0e-46b9-a785-42d6b8d3c7de",
     "status": "succeeded",
-    "strategy": "noop",
+    "strategy": "runtime",
     "canary": false,
-    "comment": "Horizon dry-run apply",
+    "comment": "Horizon runtime apply",
     "created_at": "2026-06-10T13:40:00Z",
     "updated_at": "2026-06-10T13:40:00Z",
     "errors": [],
@@ -602,11 +604,11 @@ Response: `202 Accepted`
 5. Если validation содержит errors, draft обновляется до `invalid`, а request
    завершается `400 Bad Request`.
 6. API строит plan.
-7. API создает apply job со статусом `queued`.
-8. Если plan runtime-only, backend `runtime_etcd` пишет supported values в
+7. Если plan содержит `reconfigure_required`, API сохраняет validation/plan в
+   draft и возвращает `409 Conflict` без создания apply job.
+8. API создает apply job со статусом `queued`.
+9. Если plan runtime-only, backend `runtime_etcd` пишет supported values в
    etcd runtime override и переводит job в `succeeded`.
-9. Если plan содержит `reconfigure_required`, no-op backend записывает plan без
-   изменения конфигурации и переводит job в `succeeded`.
 10. Если runtime backend возвращает `InvalidInput`, job переводится в `failed`,
     request завершается `400 Bad Request`, draft остается не примененным.
 11. Если runtime backend падает неожиданно, job переводится в `failed`, а
@@ -615,8 +617,16 @@ Response: `202 Accepted`
 13. Response возвращает `apply_job`.
 
 Важно: статус draft `applied` в текущем MVP означает, что apply workflow был
-успешно записан и завершен. Для `backend=runtime_etcd` live runtime override
-действительно изменен; для `backend=noop` live configuration не изменена.
+успешно записан и завершен через `backend=runtime_etcd`; live runtime override
+действительно изменен. Draft-ы с immutable `masakari.conf` изменениями не
+переходят в `applied`.
+
+Если draft содержит non-runtime изменения, ответ:
+
+```text
+409 Conflict
+Draft contains immutable Masakari configuration changes. Only runtime configuration changes are supported by Masakari API apply.
+```
 
 ### GET `/v1/admin-config-apply-jobs`
 
@@ -644,20 +654,27 @@ Response:
       "id": "1281c9c3-b6cc-4397-b04d-6b31a4a6d487",
       "draft_id": "6ac7b8d6-6f0e-46b9-a785-42d6b8d3c7de",
       "status": "succeeded",
-      "strategy": "noop",
+      "strategy": "rolling",
       "canary": false,
-      "comment": "Horizon dry-run apply",
+      "comment": "Horizon runtime apply",
       "created_at": "2026-06-10T13:40:00Z",
       "updated_at": "2026-06-10T13:40:00Z",
       "errors": [],
       "plan": {
         "status": "planned",
-        "steps": []
+        "steps": [
+          {
+            "group": "staged_recovery",
+            "option": "max_parallel_starts_per_host",
+            "action": "runtime_update"
+          }
+        ],
+        "apply_supported": true
       },
       "result": {
         "status": "succeeded",
-        "backend": "noop",
-        "changed": false
+        "backend": "runtime_etcd",
+        "changed": true
       }
     }
   ]
@@ -686,20 +703,27 @@ Response:
     "id": "1281c9c3-b6cc-4397-b04d-6b31a4a6d487",
     "draft_id": "6ac7b8d6-6f0e-46b9-a785-42d6b8d3c7de",
     "status": "succeeded",
-    "strategy": "noop",
+    "strategy": "rolling",
     "canary": false,
-    "comment": "Horizon dry-run apply",
+    "comment": "Horizon runtime apply",
     "created_at": "2026-06-10T13:40:00Z",
     "updated_at": "2026-06-10T13:40:00Z",
     "errors": [],
     "plan": {
       "status": "planned",
-      "steps": []
+      "steps": [
+        {
+          "group": "staged_recovery",
+          "option": "max_parallel_starts_per_host",
+          "action": "runtime_update"
+        }
+      ],
+      "apply_supported": true
     },
     "result": {
       "status": "succeeded",
-      "backend": "noop",
-      "changed": false
+      "backend": "runtime_etcd",
+      "changed": true
     }
   }
 }
@@ -708,7 +732,7 @@ Response:
 ### POST `/v1/admin-config-apply-jobs/{job_id}/rollback`
 
 Rollback endpoint зарегистрирован, защищен policy и проверяет существование
-apply job, но production rollback еще не реализован.
+apply job, но rollback еще не реализован.
 
 Policy:
 
@@ -720,7 +744,7 @@ Response:
 
 ```text
 409 Conflict
-Rollback is not supported by the no-op apply backend.
+Rollback is not supported by the admin config apply backend.
 ```
 
 Это сделано намеренно: Horizon может уже показать action и корректно обработать
@@ -795,20 +819,9 @@ override и сразу завершает его как:
 }
 ```
 
-Для draft-а с reconfigure-required изменениями backend создает apply job и
-сразу завершает его как:
-
-```json
-{
-  "status": "succeeded",
-  "backend": "noop",
-  "changed": false
-}
-```
-
-В UI нужно явно показывать backend. `runtime_etcd` означает реальное изменение
-runtime override, `noop` означает только запись apply lifecycle без изменения
-live config.
+Для draft-а с `reconfigure_required` изменениями backend возвращает
+`409 Conflict`, потому что `masakari.conf` параметры immutable для Masakari API.
+Apply job в этом случае не создается, и partial runtime update не выполняется.
 
 ### 5. Horizon отслеживает job
 
@@ -819,9 +832,9 @@ GET /v1/admin-config-apply-jobs
 GET /v1/admin-config-apply-jobs/{job_id}
 ```
 
-Для `runtime_etcd` и `noop` polling обычно не нужен, потому что job завершается
-в том же request. Для будущего external/ansible/kolla backend этот contract уже
-подходит под polling.
+Для `runtime_etcd` polling обычно не нужен, потому что job завершается в том же
+request. Для будущего external/ansible/kolla backend этот contract уже подходит
+под polling.
 
 ## Что уже можно интегрировать в Horizon plugin
 
@@ -835,7 +848,7 @@ GET /v1/admin-config-apply-jobs/{job_id}
 - diff view;
 - plan view;
 - apply action для runtime-only `max_parallel_starts_per_host`;
-- dry-run/no-op apply для reconfigure-required drafts;
+- disabled apply action для reconfigure-required drafts;
 - список apply jobs;
 - детальную страницу apply job;
 - disabled или error-handled rollback action.
@@ -843,18 +856,20 @@ GET /v1/admin-config-apply-jobs/{job_id}
 Horizon plugin должен явно показывать backend/result:
 
 ```text
-backend: runtime_etcd | noop
-changed: true | false
+backend: runtime_etcd
+changed: true
 ```
 
 ## Что еще осталось доделать
 
-### 1. Production apply backend
+### 1. Out of scope: production apply backend for immutable config
 
-Нужно реализовать реальное применение конфигурации через backend abstraction:
+В текущем контракте `masakari.conf` параметры immutable для Masakari API, поэтому
+deployment/reconfigure backend не является обязательной частью этой реализации.
+Если позже потребуется разрешить изменение non-runtime параметров из Horizon,
+нужно будет отдельно спроектировать backend abstraction:
 
 ```text
-noop
 external webhook
 ansible
 kolla/kolla-ansible
@@ -879,8 +894,8 @@ Backend должен:
 
 ### 2. Настоящая асинхронность apply jobs
 
-Сейчас `runtime_etcd` и `noop` apply завершаются синхронно в HTTP request. Для
-production нужно:
+Сейчас `runtime_etcd` apply завершается синхронно в HTTP request. Если появятся
+долгие runtime операции или внешний deployment backend, нужно:
 
 - создать job `queued`;
 - передать выполнение worker-у или внешнему backend-у;
@@ -1009,7 +1024,8 @@ Backend contract уже достаточен для первого UI prototype,
 - apply job table/detail;
 - policy-aware actions;
 - compatibility check, если endpoint недоступен;
-- понятное отображение no-op backend.
+- понятное отображение immutable `apply_supported=false` для non-runtime
+  параметров.
 
 Перед UI-разработкой нужно сделать read-only checkout/fork
 `openstack/masakari-dashboard` и реализовывать изменения в plugin, а не в Horizon
@@ -1042,20 +1058,19 @@ core, если core changes не потребуются.
 
 ## Практический следующий шаг
 
-Самый полезный следующий backend этап:
+Самый полезный следующий backend этап при сохранении immutable `masakari.conf`:
 
 ```text
-Реализовать external deployment backend для reconfigure_required параметров:
-draft -> validate -> plan -> queued job -> deployment controller -> progress -> succeeded/failed.
+Вынести Admin Config бизнес-логику из API controller в service layer:
+controller -> service -> runtime backend / immutable apply guard.
 ```
 
 Почему именно он:
 
 - runtime-safe срез уже закрыт через `runtime_etcd`;
-- Horizon теперь сможет показать real apply для безопасного параметра и no-op
-  lifecycle для reconfigure-required параметров;
-- следующий пробел для production UX - реальное применение non-runtime values;
-- этот backend нужен для `batch_delay`, `start_timeout`, `slot_lease_ttl`,
-  `etcd_*`, `nova_evacuate_microversion` и будущих config groups.
+- `masakari.conf` параметры остаются read-only/immutable через API;
+- service layer упростит будущие audit/idempotency/state-machine проверки;
+- Horizon plugin сможет отдельно использовать текущий контракт без ожидания
+  deployment backend.
 
 Параллельно можно начинать Horizon UI/plugin клиент для текущего API contract.

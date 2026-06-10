@@ -19,7 +19,8 @@ staged recovery etcd runtime override used by `EtcdStartLimiter`.
 
 Non-runtime changes still produce `reconfigure_required` plan steps. Applying a
 draft that includes non-runtime changes must not write partial runtime state; it
-falls back to the existing no-op backend until a deployment backend exists.
+is rejected with `409 Conflict` because `masakari.conf` values are immutable
+through Masakari API.
 
 ## API Behavior
 
@@ -47,13 +48,11 @@ shape. For runtime-only drafts:
 ```
 
 If the draft does not contain runtime updates, or contains any
-`reconfigure_required` step, the current no-op result remains:
+`reconfigure_required` step, apply is rejected before an apply job is created:
 
-```json
-{
-  "backend": "noop",
-  "changed": false
-}
+```text
+409 Conflict
+Draft contains immutable Masakari configuration changes. Only runtime configuration changes are supported by Masakari API apply.
 ```
 
 `GET /v1/admin-config/effective` should expose effective source metadata for the
@@ -82,6 +81,9 @@ If the etcd backend is unavailable, the apply request returns `500` through the
 existing Masakari exception path and the job is updated to `failed` with the
 error string.
 
+For non-runtime or mixed drafts, no apply job is created. The draft keeps its
+current status, and the latest validation/plan is stored for Horizon to display.
+
 ## Testing
 
 Tests must patch `EtcdStagedRecoveryStore` at the Admin Config controller
@@ -90,6 +92,6 @@ boundary and verify:
 - runtime-only apply calls `set_max_parallel_starts_per_host`;
 - result backend is `runtime_etcd`;
 - effective config reports runtime source/value;
-- mixed runtime + reconfigure draft does not call runtime apply and remains
-  no-op;
+- mixed runtime + reconfigure draft does not call runtime apply and is rejected
+  with `409 Conflict`;
 - existing route tests still pass.
