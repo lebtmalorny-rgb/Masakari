@@ -404,6 +404,7 @@ class EngineManagerUnitTestCase(test.NoDBTestCase):
             self.context,
             fake_host.name, fake_host.failover_segment.recovery_method,
             notification.notification_uuid, reserved_host_list=None,
+            segment_uuid=fake_host.failover_segment.uuid,
             update_host_method=manager.update_host_method)
         action = fields.EventNotificationAction.NOTIFICATION_PROCESS
         phase_start = fields.EventNotificationPhase.START
@@ -499,6 +500,7 @@ class EngineManagerUnitTestCase(test.NoDBTestCase):
             fake_host.name, fake_host.failover_segment.recovery_method,
             notification.notification_uuid,
             reserved_host_list=reserved_host_list,
+            segment_uuid=fake_host.failover_segment.uuid,
             update_host_method=manager.update_host_method)
         mock_get_all.assert_called_once_with(self.context, filters={
             'failover_segment_id': fake_host.failover_segment.uuid,
@@ -554,6 +556,7 @@ class EngineManagerUnitTestCase(test.NoDBTestCase):
             fake_host.name, fake_host.failover_segment.recovery_method,
             notification.notification_uuid,
             reserved_host_list=reserved_host_list,
+            segment_uuid=fake_host.failover_segment.uuid,
             update_host_method=manager.update_host_method)
         action = fields.EventNotificationAction.NOTIFICATION_PROCESS
         phase_start = fields.EventNotificationPhase.START
