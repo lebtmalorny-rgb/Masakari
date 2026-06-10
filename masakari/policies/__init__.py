@@ -16,10 +16,15 @@
 
 import itertools
 
+from masakari.policies import admin_config
+from masakari.policies import admin_overview
+from masakari.policies import audit
 from masakari.policies import base
+from masakari.policies import diagnostics
 from masakari.policies import extension_info
 from masakari.policies import hosts
 from masakari.policies import notifications
+from masakari.policies import recovery_workflows
 from masakari.policies import segments
 from masakari.policies import staged_recovery
 from masakari.policies import versions
@@ -28,10 +33,15 @@ from masakari.policies import vmoves
 
 def list_rules():
     return itertools.chain(
+        admin_config.list_rules(),
+        admin_overview.list_rules(),
+        audit.list_rules(),
         base.list_rules(),
+        diagnostics.list_rules(),
         extension_info.list_rules(),
         hosts.list_rules(),
         notifications.list_rules(),
+        recovery_workflows.list_rules(),
         segments.list_rules(),
         staged_recovery.list_rules(),
         versions.list_rules(),
