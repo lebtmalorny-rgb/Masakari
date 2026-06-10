@@ -162,16 +162,6 @@ rules = [
                 'path': '/admin-config-apply-jobs/{job_id}'
             }
         ]),
-    policy.DocumentedRuleDefault(
-        name=ADMIN_CONFIG_APPLY_JOBS % 'rollback',
-        check_str=base.RULE_ADMIN_API,
-        description="Requests rollback for a Masakari admin config apply job.",
-        operations=[
-            {
-                'method': 'POST',
-                'path': '/admin-config-apply-jobs/{job_id}/rollback'
-            }
-        ]),
     policy.RuleDefault(
         name=ADMIN_CONFIG_APPLY_JOBS % 'discoverable',
         check_str=base.RULE_ADMIN_API,

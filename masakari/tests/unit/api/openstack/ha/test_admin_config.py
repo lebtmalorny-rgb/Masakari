@@ -294,8 +294,6 @@ class AdminConfigTestCase(test.TestCase):
         self.assertRaises(exc.HTTPConflict, self.controller.drafts.apply,
                           req, created['draft']['uuid'], body={
                               'apply': {
-                                  'strategy': 'rolling',
-                                  'canary': True,
                                   'comment': 'dry run from Horizon'
                               }
                           })
@@ -338,6 +336,56 @@ class AdminConfigTestCase(test.TestCase):
             'value': 4,
             'source': 'runtime',
         }], job['result']['runtime_updates'])
+
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_rejects_deployment_strategy(self, mock_store_cls):
+        store = mock_store_cls.return_value
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        self.assertRaises(exc.HTTPBadRequest, self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={
+                              'apply': {'strategy': 'rolling'}
+                          })
+
+        store.set_max_parallel_starts_per_host.assert_not_called()
+        index = self.controller.apply_jobs.index(req)
+        self.assertEqual([], index['apply_jobs'])
+
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_rejects_canary_apply(self, mock_store_cls):
+        store = mock_store_cls.return_value
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        self.assertRaises(exc.HTTPBadRequest, self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={
+                              'apply': {'canary': True}
+                          })
+
+        store.set_max_parallel_starts_per_host.assert_not_called()
+        index = self.controller.apply_jobs.index(req)
+        self.assertEqual([], index['apply_jobs'])
 
     @mock.patch('masakari.api.openstack.ha.admin_config.'
                 'staged_state.EtcdStagedRecoveryStore')
@@ -447,7 +495,7 @@ class AdminConfigTestCase(test.TestCase):
 
     @mock.patch('masakari.api.openstack.ha.admin_config.'
                 'staged_state.EtcdStagedRecoveryStore')
-    def test_apply_jobs_index_and_rollback_unsupported(self, mock_store_cls):
+    def test_apply_jobs_index(self, mock_store_cls):
         store = mock_store_cls.return_value
         store.set_max_parallel_starts_per_host.return_value = 4
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
@@ -469,9 +517,6 @@ class AdminConfigTestCase(test.TestCase):
         self.assertEqual(1, len(index['apply_jobs']))
         self.assertEqual(applied['apply_job']['id'],
                          index['apply_jobs'][0]['id'])
-        self.assertRaises(exc.HTTPConflict,
-                          self.controller.apply_jobs.rollback, req,
-                          applied['apply_job']['id'], body={'rollback': {}})
 
     @mock.patch('masakari.ha.api.NotificationAPI')
     def test_draft_routes(self, mock_notification_api):
@@ -533,7 +578,7 @@ class AdminConfigTestCase(test.TestCase):
         apply_req.method = 'POST'
         apply_req.headers['Content-Type'] = 'application/json'
         apply_req.body = jsonutils.dump_as_bytes({
-            'apply': {'strategy': 'rolling'}
+            'apply': {'comment': 'runtime apply'}
         })
         apply_response = apply_req.get_response(self.app)
 
@@ -549,3 +594,13 @@ class AdminConfigTestCase(test.TestCase):
         self.assertEqual(HTTPStatus.OK, show_response.status_code)
         show_body = jsonutils.loads(show_response.body)
         self.assertEqual('succeeded', show_body['apply_job']['status'])
+
+        rollback_req = fakes.HTTPRequest.blank(
+            '/v1/admin-config-apply-jobs/%s/rollback' % job_id,
+            use_admin_context=True)
+        rollback_req.method = 'POST'
+        rollback_req.headers['Content-Type'] = 'application/json'
+        rollback_req.body = jsonutils.dump_as_bytes({'rollback': {}})
+        rollback_response = rollback_req.get_response(self.app)
+
+        self.assertEqual(HTTPStatus.NOT_FOUND, rollback_response.status_code)

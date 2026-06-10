@@ -71,7 +71,7 @@ Masakari REST API / Admin API
         ↓
 Masakari service layer
         ↓
-Masakari DB + etcd + Nova API + deployment/apply backend
+Masakari DB + etcd + Nova API
         ↓
 masakari-engine / masakari-api / masakari-monitors
 ```
@@ -87,10 +87,20 @@ masakari-engine / masakari-api / masakari-monitors
 7. Создавать черновик конфигурации.
 8. Валидировать черновик.
 9. Видеть diff и impact analysis.
-10. Применять конфигурацию через controlled apply workflow.
-11. Выполнять rollback.
-12. Смотреть аудит изменений.
-13. Смотреть диагностику Masakari/Nova/etcd/coordination.
+10. Применять только runtime-safe конфигурацию через controlled apply workflow.
+11. Смотреть аудит изменений.
+12. Смотреть диагностику Masakari/Nova/etcd/coordination.
+
+Текущий backend scope для этого fork-а:
+
+- `masakari.conf` и `masakari-custom-recovery-methods.conf` immutable для
+  Masakari API;
+- Admin Config API применяет только runtime-safe override
+  `staged_recovery.max_parallel_starts_per_host` через etcd;
+- `rolling`, `canary`, deployment/reconfigure backend и rollback API не входят
+  в Masakari backend MVP;
+- Horizon plugin должен показывать non-runtime параметры как read-only/staged и
+  блокировать apply для draft-ов с `apply_supported=false`.
 
 ---
 
@@ -243,36 +253,23 @@ masakari/ha/audit_api.py
 
 ---
 
-### 2.6 Deployment / Apply backend
+### 2.6 Runtime apply boundary
 
-Для применения конфигурации нужен отдельный слой. Masakari REST API создаёт apply job, но конкретное применение должно выполнять backend.
+В текущем Masakari backend API не реализует deployment/reconfigure backend.
+Apply job создается только для runtime-safe изменений, которые backend может
+применить без записи config files, restart/reload сервисов, SSH, systemd или
+контейнерных операций.
 
-Возможные backend drivers:
-
-```text
-noop        — только validate/plan, без фактического применения;
-local_file  — запись файлов на текущей ноде, только для dev/test;
-ansible     — генерация inventory и запуск Ansible job;
-kolla       — интеграция с Kolla/Kolla-Ansible;
-helm        — интеграция с Helm values для Kubernetes deployment;
-external    — webhook во внешний deployment controller.
-```
-
-**Рекомендуемый MVP:**
+Поддерживаемый runtime apply MVP:
 
 ```text
-noop + external webhook
+staged_recovery.max_parallel_starts_per_host -> etcd runtime override
 ```
 
-**Production-вариант:**
-
-```text
-external deployment controller
-или
-ansible/kolla driver
-```
-
-API должен быть спроектирован так, чтобы apply backend можно было заменить без изменения Horizon plugin.
+Non-runtime параметры остаются частью schema/draft/validate/diff/plan, чтобы
+Horizon мог показывать typed UI и impact, но apply для таких draft-ов должен
+быть disabled. Если оператору нужно изменить `masakari.conf`, это выполняется
+через существующий deployment pipeline вне Masakari API.
 
 ---
 
@@ -384,8 +381,7 @@ All options mode
 - mutable/restart-required marker;
 - service impact;
 - diff current vs draft;
-- plan before apply;
-- rollback.
+- plan before apply.
 
 ---
 
@@ -436,7 +432,7 @@ UI не должен давать оператору вписать произв
 - кто создал draft;
 - кто изменил draft;
 - кто выполнил validate;
-- кто approve/apply/rollback;
+- кто выполнил apply;
 - какие параметры изменились;
 - какие secrets были изменены без раскрытия значений;
 - результат apply job;
@@ -494,7 +490,6 @@ Diagnostics API/UI должен проверять:
 - create draft;
 - validate draft;
 - apply draft;
-- rollback;
 - emergency release slot;
 - trigger reconcile.
 
@@ -508,8 +503,7 @@ HTTP API не должен выполнять долгие операции си
 
 Долгие операции:
 
-- config apply;
-- rollback;
+- future long-running runtime config apply;
 - diagnostics full scan;
 - reconcile stale recoveries;
 - health scan across nodes.
@@ -579,8 +573,8 @@ top-level collections под `/v1/{collection}` и `/v1/{project_id}/{collection
 с `custom_routes_fn`, который делегирует в те же service classes. Такой путь
 считается compatibility layer и не должен дублировать бизнес-логику.
 
-Для сложных nested operations (`drafts/{id}/validate`, `apply-jobs/{id}/rollback`
-и т.п.) допустимы два варианта:
+Для сложных nested operations (`drafts/{id}/validate`,
+`drafts/{id}/apply` и т.п.) допустимы два варианта:
 
 ```text
 1. отдельные top-level resources;
@@ -915,7 +909,6 @@ Not allowed after:
 ```text
 applying
 applied
-rollback_started
 ```
 
 ---
@@ -984,21 +977,20 @@ Allowed only if not applying/applied.
 {
   "plan": {
     "draft_id": "draft-2026-06-10-001",
-    "status": "ready",
-    "changed_options": 4,
-    "restart_required": true,
-    "affected_services": [
+    "status": "planned",
+    "steps": [
       {
-        "service": "masakari-engine",
-        "restart_required": true,
-        "apply_strategy": "rolling"
+        "group": "staged_recovery",
+        "option": "max_parallel_starts_per_host",
+        "action": "runtime_update"
       },
       {
-        "service": "masakari-api",
-        "restart_required": false,
-        "apply_strategy": "none"
+        "group": "staged_recovery",
+        "option": "batch_delay",
+        "action": "reconfigure_required"
       }
     ],
+    "apply_supported": false,
     "diff": [
       {
         "file": "masakari.conf",
@@ -1030,26 +1022,31 @@ Return structured diff for UI. Do not return secrets.
 
 ---
 
-## 11. REST API: Apply / Rollback
+## 11. REST API: Runtime Apply
 
 ### 11.1 POST `/v1/admin-config-drafts/{draft_id}/apply`
 
-**Назначение:** запустить применение конфигурации.
+**Назначение:** применить runtime-safe draft.
 
 **Policy:** `os_masakari_api:admin-config-drafts:apply`
+
+Backend принимает apply только для draft-а, plan которого содержит только
+`runtime_update` steps. Draft с `reconfigure_required` steps должен вернуть
+`409 Conflict` без создания apply job.
 
 **Request example:**
 
 ```json
 {
   "apply": {
-    "strategy": "rolling",
-    "canary": true,
-    "allow_apply_with_active_recoveries": false,
-    "comment": "Enable staged recovery limiter"
+    "comment": "Change staged recovery start limiter"
   }
 }
 ```
+
+`strategy`, `canary` и `allow_apply_with_active_recoveries` не являются
+управляющими параметрами текущего Masakari backend API. Новые apply jobs всегда
+создаются как `strategy=runtime`, `canary=false`.
 
 **Response:**
 
@@ -1058,7 +1055,14 @@ Return structured diff for UI. Do not return secrets.
   "apply_job": {
     "id": "apply-2026-06-10-001",
     "draft_id": "draft-2026-06-10-001",
-    "status": "queued",
+    "status": "succeeded",
+    "strategy": "runtime",
+    "canary": false,
+    "result": {
+      "status": "succeeded",
+      "backend": "runtime_etcd",
+      "changed": true
+    },
     "created_at": "2026-06-10T12:47:00Z",
     "links": [
       {"rel": "self", "href": "/v1/admin-config-apply-jobs/apply-2026-06-10-001"}
@@ -1069,6 +1073,9 @@ Return structured diff for UI. Do not return secrets.
 
 **HTTP status:** `202 Accepted`
 
+Для текущего `runtime_etcd` backend job завершается в рамках HTTP request.
+Apply job все равно сохраняется, чтобы Horizon мог показать результат и ошибки.
+
 ---
 
 ### 11.2 GET `/v1/admin-config-apply-jobs`
@@ -1078,7 +1085,7 @@ Return structured diff for UI. Do not return secrets.
 Filters:
 
 ```text
-status=queued|running|succeeded|failed|rolled_back
+status=queued|succeeded|failed
 limit
 marker
 ```
@@ -1096,26 +1103,14 @@ marker
   "apply_job": {
     "id": "apply-2026-06-10-001",
     "draft_id": "draft-2026-06-10-001",
-    "status": "running",
-    "strategy": "rolling",
-    "current_step": "restart_masakari_engine_controller_2",
-    "progress": 60,
-    "steps": [
-      {
-        "name": "validate",
-        "status": "succeeded",
-        "started_at": "2026-06-10T12:47:00Z",
-        "finished_at": "2026-06-10T12:47:03Z"
-      },
-      {
-        "name": "canary_apply_controller_1",
-        "status": "succeeded"
-      },
-      {
-        "name": "rolling_apply_controller_2",
-        "status": "running"
-      }
-    ],
+    "status": "succeeded",
+    "strategy": "runtime",
+    "canary": false,
+    "result": {
+      "status": "succeeded",
+      "backend": "runtime_etcd",
+      "changed": true
+    },
     "errors": []
   }
 }
@@ -1123,21 +1118,9 @@ marker
 
 ---
 
-### 11.4 POST `/v1/admin-config-apply-jobs/{job_id}/rollback`
-
-**Policy:** `os_masakari_api:admin-config-apply-jobs:rollback`
-
-**Request:**
-
-```json
-{
-  "rollback": {
-    "comment": "Rollback after failed engine health check"
-  }
-}
-```
-
-**Response:** `202 Accepted` with rollback job id.
+Rollback endpoint намеренно не входит в текущий контракт Masakari backend.
+Для `max_parallel_starts_per_host` возврат старого значения выполняется через
+новый draft с предыдущим значением и обычный runtime apply.
 
 ---
 
@@ -1496,7 +1479,6 @@ os_masakari_api:admin-config-drafts:apply
 
 os_masakari_api:admin-config-apply-jobs:index
 os_masakari_api:admin-config-apply-jobs:detail
-os_masakari_api:admin-config-apply-jobs:rollback
 
 os_masakari_api:admin-recovery-workflows:schema
 os_masakari_api:admin-recovery-workflows:effective
@@ -1541,7 +1523,7 @@ ha_operator:
   segments/hosts, config draft create/update/validate, diagnostics run, reconcile dry-run
 
 ha_admin:
-  apply, rollback, recovery workflow update, slot release, force release
+  apply, recovery workflow update, slot release, force release
 ```
 
 ---
@@ -2158,7 +2140,6 @@ GET /v1/admin-config-drafts/{draft_id}
 POST /v1/admin-config-drafts/{draft_id}/apply
 GET /v1/admin-config-apply-jobs
 GET /v1/admin-config-apply-jobs/{job_id}
-POST /v1/admin-config-apply-jobs/{job_id}/rollback
 ```
 
 ---
@@ -2260,7 +2241,8 @@ After deploy / runtime-safe:
 `max_parallel_starts_per_host` is runtime-safe because the current staged
 recovery store supports an etcd-backed runtime override via
 `/staged-recovery/start-limit`. Other options should be changed through a
-draft/validate/plan/apply flow and the selected deployment backend.
+deployment pipeline outside Masakari API; Horizon should keep apply disabled
+for draft plans with `apply_supported=false`.
 
 Warnings:
 
@@ -2571,12 +2553,12 @@ Implement:
 
 - apply plan;
 - apply job model;
-- noop apply backend;
-- rollback API;
+- runtime etcd apply backend;
 - audit events;
 - tests.
 
-MVP can use `noop` backend only, but API must be future-proof.
+MVP applies only `staged_recovery.max_parallel_starts_per_host` through etcd
+runtime override. Non-runtime config remains immutable for Masakari API.
 
 ---
 
@@ -2652,7 +2634,6 @@ Test:
 - secret masking;
 - draft lifecycle;
 - apply lifecycle;
-- rollback lifecycle;
 - staged state list;
 - slots list/release;
 - diagnostics job.

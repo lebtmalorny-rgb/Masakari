@@ -470,26 +470,22 @@ class AdminConfigDraftsController(wsgi.Controller):
         raise exception.InvalidInput(
             reason=IMMUTABLE_CONFIG_APPLY_MESSAGE)
 
-    def _apply_failure_result(self, plan, message):
-        backend = ('runtime_etcd' if self._runtime_apply_supported(plan)
-                   else 'unsupported')
+    def _apply_failure_result(self, message):
         return {
             'status': 'failed',
-            'backend': backend,
+            'backend': 'runtime_etcd',
             'changed': False,
             'message': message,
         }
 
-    def _apply_failure_errors(self, plan, message):
-        code = ('runtime_apply_failed' if self._runtime_apply_supported(plan)
-                else 'apply_failed')
-        return [{'code': code, 'message': message}]
+    def _apply_failure_errors(self, message):
+        return [{'code': 'runtime_apply_failed', 'message': message}]
 
-    def _record_apply_failure(self, context, job_uuid, plan, message):
+    def _record_apply_failure(self, context, job_uuid, message):
         db.admin_config_apply_job_update(context, job_uuid, {
             'status': 'failed',
-            'result': _dumps(self._apply_failure_result(plan, message)),
-            'errors': _dumps(self._apply_failure_errors(plan, message)),
+            'result': _dumps(self._apply_failure_result(message)),
+            'errors': _dumps(self._apply_failure_errors(message)),
         })
 
     @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.BAD_REQUEST))
@@ -607,14 +603,20 @@ class AdminConfigDraftsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation='Draft validation failed.')
 
         apply_body = _apply_from_body(body)
-        strategy = apply_body.get('strategy') or 'runtime'
-        if not isinstance(strategy, str):
+        strategy = apply_body.get('strategy')
+        if strategy is not None and not isinstance(strategy, str):
             raise exc.HTTPBadRequest(explanation='Apply strategy must be a '
                                      'string.')
-        canary = apply_body.get('canary', False)
-        if not isinstance(canary, bool):
+        if strategy not in (None, 'runtime'):
+            raise exc.HTTPBadRequest(explanation='Apply strategy is fixed to '
+                                     'runtime.')
+        canary = apply_body.get('canary')
+        if canary is not None and not isinstance(canary, bool):
             raise exc.HTTPBadRequest(explanation='Apply canary must be a '
                                      'boolean.')
+        if canary:
+            raise exc.HTTPBadRequest(explanation='Canary apply is not '
+                                     'supported for runtime configuration.')
 
         plan = self._build_plan(changes)
         if not self._runtime_apply_supported(plan):
@@ -629,8 +631,8 @@ class AdminConfigDraftsController(wsgi.Controller):
             'uuid': uuidutils.generate_uuid(),
             'draft_uuid': draft['uuid'],
             'status': 'queued',
-            'strategy': strategy,
-            'canary': canary,
+            'strategy': 'runtime',
+            'canary': False,
             'comment': apply_body.get('comment'),
             'plan': _dumps(plan),
             'result': None,
@@ -640,10 +642,10 @@ class AdminConfigDraftsController(wsgi.Controller):
             result = self._apply_result(changes, plan)
         except exception.MasakariException as err:
             message = err.format_message()
-            self._record_apply_failure(context, job['uuid'], plan, message)
+            self._record_apply_failure(context, job['uuid'], message)
             raise exc.HTTPBadRequest(explanation=message)
         except Exception as err:
-            self._record_apply_failure(context, job['uuid'], plan, str(err))
+            self._record_apply_failure(context, job['uuid'], str(err))
             raise
 
         job = db.admin_config_apply_job_update(context, job['uuid'], {
@@ -708,15 +710,6 @@ class AdminConfigApplyJobsController(wsgi.Controller):
         context.can(admin_config_policies.ADMIN_CONFIG_APPLY_JOBS % 'detail')
         return {'apply_job': self.view(self._get(context, id))}
 
-    @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.NOT_FOUND,
-                                 HTTPStatus.CONFLICT))
-    def rollback(self, req, job_id, body=None):
-        context = req.environ['masakari.context']
-        context.can(admin_config_policies.ADMIN_CONFIG_APPLY_JOBS % 'rollback')
-        self._get(context, job_id)
-        raise exc.HTTPConflict(explanation='Rollback is not supported by the '
-                               'admin config apply backend.')
-
 
 class AdminConfig(extensions.V1APIExtensionBase):
     """Admin config schema and effective values."""
@@ -739,8 +732,7 @@ class AdminConfig(extensions.V1APIExtensionBase):
             extensions.ResourceExtension(
                 'admin-config-apply-jobs',
                 controller.apply_jobs,
-                member_name='admin_config_apply_job',
-                custom_routes_fn=self.apply_job_custom_routes),
+                member_name='admin_config_apply_job'),
         ]
 
     def get_controller_extensions(self):
@@ -767,11 +759,4 @@ class AdminConfig(extensions.V1APIExtensionBase):
         mapper.connect('admin-config-drafts-apply',
                        '/admin-config-drafts/{draft_id}/apply',
                        controller=wsgi_resource, action='apply',
-                       conditions={'method': ['POST']})
-
-    @staticmethod
-    def apply_job_custom_routes(mapper, wsgi_resource):
-        mapper.connect('admin-config-apply-jobs-rollback',
-                       '/admin-config-apply-jobs/{job_id}/rollback',
-                       controller=wsgi_resource, action='rollback',
                        conditions={'method': ['POST']})

@@ -21,13 +21,12 @@ Horizon:
   параметрами можно валидировать, смотреть diff/plan, но нельзя применить через
   Masakari API;
 - просмотр apply jobs;
-- rollback endpoint как явная заглушка с `409 Conflict`;
 - policy rules для всех новых Admin Config endpoints;
 - unit-тесты API, DB, миграции и policy/extension loading.
 
 Текущая реализация безопасна для интеграционной оценки Horizon: `apply` не
-пишет конфигурационные файлы, не перезапускает сервисы и не вызывает внешний
-deployment backend. Единственное реальное изменение runtime state сейчас -
+пишет конфигурационные файлы, не перезапускает сервисы и не имеет deployment
+backend в публичном контракте. Единственное реальное изменение runtime state -
 запись `staged_recovery.max_parallel_starts_per_host` в существующий etcd
 runtime override, который уже читает staged recovery limiter.
 
@@ -98,8 +97,8 @@ Apply jobs хранятся в SQL DB в таблице `admin_config_apply_jobs
 uuid        - публичный идентификатор apply job;
 draft_uuid  - ссылка на config draft;
 status      - queued / succeeded / failed, сейчас фактически queued -> succeeded/failed;
-strategy    - строка из apply request, по умолчанию runtime;
-canary      - boolean-флаг из apply request;
+strategy    - server-controlled значение runtime, оставлено для совместимости схемы;
+canary      - server-controlled значение false, оставлено для совместимости схемы;
 comment     - комментарий apply request;
 plan        - JSON apply plan, сохраненный на момент apply;
 result      - JSON результат выполнения;
@@ -130,7 +129,6 @@ os_masakari_api:admin-config-drafts:apply
 
 os_masakari_api:admin-config-apply-jobs:index
 os_masakari_api:admin-config-apply-jobs:detail
-os_masakari_api:admin-config-apply-jobs:rollback
 ```
 
 Сейчас все они используют `rule:admin_api`. Разделение на `ha_viewer`,
@@ -190,8 +188,9 @@ Response:
   `staged_recovery.max_parallel_starts_per_host`;
 - `deploy_stage=runtime` означает, что параметр потенциально может
   применяться через runtime path;
-- `deploy_stage=reconfigure` означает, что нужен deployment/reconfigure
-  backend;
+- `deploy_stage=reconfigure` означает immutable `masakari.conf` параметр:
+  его можно показывать, валидировать и планировать, но нельзя применять через
+  Masakari API;
 - `secret=true` выставляется по имени option, если имя содержит
   `password`, `secret`, `token` или `key`.
 
@@ -537,8 +536,6 @@ Request:
 ```json
 {
   "apply": {
-    "strategy": "runtime",
-    "canary": false,
     "comment": "Horizon runtime apply"
   }
 }
@@ -547,10 +544,13 @@ Request:
 Поля:
 
 ```text
-strategy - string, optional, default runtime; сейчас сохраняется в job;
-canary   - boolean, optional, default false; сейчас только сохраняется в job;
-comment  - string, optional.
+comment - string, optional.
 ```
+
+`strategy` и `canary` больше не являются управляющими параметрами apply API.
+Новые jobs всегда создаются как `strategy=runtime`, `canary=false`. Для мягкой
+совместимости API допускает `strategy=runtime` и `canary=false`, но отклоняет
+`strategy` с любым другим значением и `canary=true` как `400 Bad Request`.
 
 Response: `202 Accepted`
 
@@ -603,18 +603,21 @@ Response: `202 Accepted`
 4. API повторно валидирует changes.
 5. Если validation содержит errors, draft обновляется до `invalid`, а request
    завершается `400 Bad Request`.
-6. API строит plan.
-7. Если plan содержит `reconfigure_required`, API сохраняет validation/plan в
+6. API проверяет apply request: поддерживается только runtime strategy без
+   canary.
+7. API строит plan.
+8. Если plan содержит `reconfigure_required`, API сохраняет validation/plan в
    draft и возвращает `409 Conflict` без создания apply job.
-8. API создает apply job со статусом `queued`.
-9. Если plan runtime-only, backend `runtime_etcd` пишет supported values в
+9. API создает apply job со статусом `queued`, `strategy=runtime` и
+   `canary=false`.
+10. Если plan runtime-only, backend `runtime_etcd` пишет supported values в
    etcd runtime override и переводит job в `succeeded`.
-10. Если runtime backend возвращает `InvalidInput`, job переводится в `failed`,
+11. Если runtime backend возвращает `InvalidInput`, job переводится в `failed`,
     request завершается `400 Bad Request`, draft остается не примененным.
-11. Если runtime backend падает неожиданно, job переводится в `failed`, а
+12. Если runtime backend падает неожиданно, job переводится в `failed`, а
     request идет через стандартный `500 Internal Server Error` путь.
-12. Draft переводится в `applied` только после успешного apply.
-13. Response возвращает `apply_job`.
+13. Draft переводится в `applied` только после успешного apply.
+14. Response возвращает `apply_job`.
 
 Важно: статус draft `applied` в текущем MVP означает, что apply workflow был
 успешно записан и завершен через `backend=runtime_etcd`; live runtime override
@@ -654,7 +657,7 @@ Response:
       "id": "1281c9c3-b6cc-4397-b04d-6b31a4a6d487",
       "draft_id": "6ac7b8d6-6f0e-46b9-a785-42d6b8d3c7de",
       "status": "succeeded",
-      "strategy": "rolling",
+      "strategy": "runtime",
       "canary": false,
       "comment": "Horizon runtime apply",
       "created_at": "2026-06-10T13:40:00Z",
@@ -703,7 +706,7 @@ Response:
     "id": "1281c9c3-b6cc-4397-b04d-6b31a4a6d487",
     "draft_id": "6ac7b8d6-6f0e-46b9-a785-42d6b8d3c7de",
     "status": "succeeded",
-    "strategy": "rolling",
+    "strategy": "runtime",
     "canary": false,
     "comment": "Horizon runtime apply",
     "created_at": "2026-06-10T13:40:00Z",
@@ -729,27 +732,11 @@ Response:
 }
 ```
 
-### POST `/v1/admin-config-apply-jobs/{job_id}/rollback`
-
-Rollback endpoint зарегистрирован, защищен policy и проверяет существование
-apply job, но rollback еще не реализован.
-
-Policy:
-
-```text
-os_masakari_api:admin-config-apply-jobs:rollback
-```
-
-Response:
-
-```text
-409 Conflict
-Rollback is not supported by the admin config apply backend.
-```
-
-Это сделано намеренно: Horizon может уже показать action и корректно обработать
-unsupported state, но backend не будет создавать ложное ощущение настоящего
-rollback.
+Rollback endpoint не входит в текущий backend MVP. Для runtime-only параметра
+откат выполняется обычным новым draft/apply со старым значением
+`staged_recovery.max_parallel_starts_per_host`; для immutable `masakari.conf`
+параметров изменение и откат остаются задачей deployment-процесса вне Masakari
+API.
 
 ## Логика работы end-to-end
 
@@ -833,8 +820,8 @@ GET /v1/admin-config-apply-jobs/{job_id}
 ```
 
 Для `runtime_etcd` polling обычно не нужен, потому что job завершается в том же
-request. Для будущего external/ansible/kolla backend этот contract уже подходит
-под polling.
+request. Список и detail нужны как audit-friendly история runtime apply и для
+отображения результата/ошибок в Horizon.
 
 ## Что уже можно интегрировать в Horizon plugin
 
@@ -850,8 +837,7 @@ request. Для будущего external/ansible/kolla backend этот contrac
 - apply action для runtime-only `max_parallel_starts_per_host`;
 - disabled apply action для reconfigure-required drafts;
 - список apply jobs;
-- детальную страницу apply job;
-- disabled или error-handled rollback action.
+- детальную страницу apply job.
 
 Horizon plugin должен явно показывать backend/result:
 
@@ -862,43 +848,21 @@ changed: true
 
 ## Что еще осталось доделать
 
-### 1. Out of scope: production apply backend for immutable config
+### 1. Immutable non-runtime config remains out of Masakari API apply
 
 В текущем контракте `masakari.conf` параметры immutable для Masakari API, поэтому
-deployment/reconfigure backend не является обязательной частью этой реализации.
-Если позже потребуется разрешить изменение non-runtime параметров из Horizon,
-нужно будет отдельно спроектировать backend abstraction:
-
-```text
-external webhook
-ansible
-kolla/kolla-ansible
-helm
-local_file только для dev/test
-```
-
-Минимальный production-путь для Horizon:
-
-```text
-Masakari API -> external deployment controller
-```
-
-Backend должен:
-
-- принимать apply plan;
-- выполнять deployment/reconfigure вне HTTP request;
-- возвращать progress/status/errors;
-- уметь различать runtime-only changes и reconfigure-required changes;
-- не раскрывать secrets;
-- писать audit events.
+backend не должен реализовывать `rolling`, `canary`, rollback или внешний
+deployment/reconfigure path. Horizon может показывать такие параметры как
+read-only/staged и объяснять оператору, что изменение выполняется через
+deployment pipeline вне Masakari API.
 
 ### 2. Настоящая асинхронность apply jobs
 
 Сейчас `runtime_etcd` apply завершается синхронно в HTTP request. Если появятся
-долгие runtime операции или внешний deployment backend, нужно:
+другие runtime-safe операции, которые могут выполняться долго, нужно:
 
 - создать job `queued`;
-- передать выполнение worker-у или внешнему backend-у;
+- передать выполнение worker-у;
 - вернуть `202 Accepted` сразу;
 - обновлять job statuses: `queued`, `running`, `succeeded`, `failed`,
   `cancelled`;
@@ -911,12 +875,13 @@ Backend должен:
 `staged_recovery.max_parallel_starts_per_host`. Если появятся другие runtime-safe
 options, нужно расширить allowlist, validation, plan и runtime backend.
 
-### 4. Reconfigure apply для non-runtime options
+### 4. Явное UI-поведение для non-runtime options
 
 Для `batch_delay`, `start_timeout`, `slot_lease_ttl`, `etcd_*`,
-`nova_evacuate_microversion` и других non-runtime options нужен deployment
-backend, который обновляет config files или values в системе управления
-деплоем, а затем безопасно перезапускает/перечитывает нужные сервисы.
+`nova_evacuate_microversion` и других non-runtime options Horizon должен
+показывать `deploy_stage=reconfigure` и `apply_supported=false`. Backend уже
+возвращает `409 Conflict`, если такой draft отправлен на apply; UI должен
+предотвращать этот сценарий на стороне оператора.
 
 ### 5. Поддержка остальных config groups
 
@@ -932,30 +897,18 @@ backend, который обновляет config files или values в сис�
 Для workflow tasks нужен allowlist, чтобы Horizon не мог отправить произвольное
 имя Python task.
 
-### 6. Rollback lifecycle
-
-Сейчас rollback возвращает `409 Conflict`. Нужно реализовать:
-
-- snapshot applied configuration before apply;
-- rollback job model или тип apply job;
-- `POST /admin-config-apply-jobs/{job_id}/rollback -> 202 Accepted`;
-- rollback plan;
-- rollback execution через тот же deployment backend;
-- отображение rollback status/errors;
-- audit events.
-
-### 7. Audit API и события
+### 6. Audit API и события
 
 Требование из основного ТЗ пока не закрыто. Нужно добавить:
 
 - audit event model/repository;
 - `GET /v1/admin-audit/events`;
 - audit для create/update/delete draft;
-- audit для validate/plan/apply/rollback;
+- audit для validate/plan/apply;
 - запись changed fields без plaintext secrets;
 - связь audit events с user/project/request id.
 
-### 8. Idempotency-Key
+### 7. Idempotency-Key
 
 Сейчас write endpoints не поддерживают `Idempotency-Key`.
 
@@ -964,14 +917,13 @@ backend, который обновляет config files или values в сис�
 - draft create;
 - validate;
 - apply;
-- rollback;
 - diagnostics jobs;
 - future emergency operations.
 
 Это особенно важно для Horizon, потому что пользователь может повторить request
 после timeout или browser retry.
 
-### 9. Более строгая state machine draft/apply
+### 8. Более строгая state machine draft/apply
 
 Сейчас состояния минимальные. Нужно формализовать transitions:
 
@@ -979,13 +931,12 @@ backend, который обновляет config files или values в сис�
 draft -> valid -> planned -> applying -> applied
 draft -> invalid
 applying -> failed
-applied -> rollback_requested -> rollback_running -> rolled_back
 ```
 
 Также нужно запретить удаление/изменение draft, если по нему уже есть running
 apply job.
 
-### 10. Pagination, filters и marker support
+### 9. Pagination, filters и marker support
 
 DB API уже частично поддерживает sort/limit/marker для apply jobs, но HTTP
 controller пока не предоставляет полноценный contract.
@@ -998,7 +949,7 @@ controller пока не предоставляет полноценный contr
 - фильтры по `status`, `draft_id`, `created_at`;
 - одинаковый pagination style для drafts и jobs.
 
-### 11. Service layer extraction
+### 10. Service layer extraction
 
 Сейчас логика MVP находится в API controller. Для production лучше вынести
 бизнес-логику в service layer, например:
@@ -1012,7 +963,7 @@ masakari/config_admin/apply.py
 
 API controller должен остаться тонким: policy, request parsing, response view.
 
-### 12. Horizon plugin
+### 11. Horizon plugin
 
 Backend contract уже достаточен для первого UI prototype, но сам Horizon plugin
 еще нужно реализовать:
@@ -1031,7 +982,7 @@ Backend contract уже достаточен для первого UI prototype,
 `openstack/masakari-dashboard` и реализовывать изменения в plugin, а не в Horizon
 core, если core changes не потребуются.
 
-### 13. Diagnostics API
+### 12. Diagnostics API
 
 Из основного ТЗ еще остается diagnostics:
 
@@ -1043,18 +994,17 @@ core, если core changes не потребуются.
 - workflow config check;
 - stale notification/recovery checks.
 
-### 14. Тесты, которые стоит добавить следующими
+### 13. Тесты, которые стоит добавить следующими
 
 Текущие unit-тесты закрывают MVP. Для следующих фаз нужны:
 
 - concurrency tests для одного активного apply job;
 - idempotency tests;
-- rollback tests;
 - audit tests;
 - service-layer tests после extraction;
 - Horizon API client tests;
 - negative API tests для invalid apply body, pagination и filters;
-- production backend driver tests.
+- runtime backend extension tests, если появятся новые runtime-safe options.
 
 ## Практический следующий шаг
 
@@ -1071,6 +1021,6 @@ controller -> service -> runtime backend / immutable apply guard.
 - `masakari.conf` параметры остаются read-only/immutable через API;
 - service layer упростит будущие audit/idempotency/state-machine проверки;
 - Horizon plugin сможет отдельно использовать текущий контракт без ожидания
-  deployment backend.
+  дополнительных backend-фичей.
 
 Параллельно можно начинать Horizon UI/plugin клиент для текущего API contract.
