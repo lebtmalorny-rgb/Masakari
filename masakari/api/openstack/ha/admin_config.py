@@ -79,6 +79,17 @@ def _draft_from_body(body):
     return draft
 
 
+def _apply_from_body(body):
+    apply = (body or {}).get('apply') or {}
+    if not isinstance(apply, dict):
+        raise exc.HTTPBadRequest(explanation='Apply must be an object.')
+    return apply
+
+
+def _format_datetime(value):
+    return value.isoformat() + 'Z' if value else None
+
+
 def _staged_recovery_opts_by_name():
     return {opt.name: opt for opt in staged_recovery_conf.staged_recovery_opts}
 
@@ -189,6 +200,7 @@ class AdminConfigController(wsgi.Controller):
 
     def __init__(self):
         self.drafts = AdminConfigDraftsController(self)
+        self.apply_jobs = AdminConfigApplyJobsController()
 
     def _staged_recovery_schema(self):
         options = []
@@ -492,6 +504,126 @@ class AdminConfigDraftsController(wsgi.Controller):
         db.admin_config_draft_update(context, draft_id, {'plan': _dumps(plan)})
         return {'plan': plan}
 
+    @wsgi.response(HTTPStatus.ACCEPTED)
+    @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.NOT_FOUND,
+                                 HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT))
+    def apply(self, req, draft_id, body=None):
+        context = req.environ['masakari.context']
+        context.can(admin_config_policies.ADMIN_CONFIG_DRAFTS % 'apply')
+        draft = self._get(context, draft_id)
+        if draft['status'] in ('applying', 'applied'):
+            raise exc.HTTPConflict(explanation='Draft is already applying or '
+                                   'applied.')
+
+        changes = _loads(draft['values']) or {}
+        validation = self._validate_changes(changes)
+        if validation['errors']:
+            db.admin_config_draft_update(context, draft_id, {
+                'status': validation['status'],
+                'validation': _dumps(validation),
+            })
+            raise exc.HTTPBadRequest(explanation='Draft validation failed.')
+
+        apply_body = _apply_from_body(body)
+        strategy = apply_body.get('strategy') or 'noop'
+        if not isinstance(strategy, str):
+            raise exc.HTTPBadRequest(explanation='Apply strategy must be a '
+                                     'string.')
+        canary = apply_body.get('canary', False)
+        if not isinstance(canary, bool):
+            raise exc.HTTPBadRequest(explanation='Apply canary must be a '
+                                     'boolean.')
+
+        plan = self._build_plan(changes)
+        job = db.admin_config_apply_job_create(context, {
+            'uuid': uuidutils.generate_uuid(),
+            'draft_uuid': draft['uuid'],
+            'status': 'queued',
+            'strategy': strategy,
+            'canary': canary,
+            'comment': apply_body.get('comment'),
+            'plan': _dumps(plan),
+            'result': None,
+            'errors': None,
+        })
+        result = {
+            'status': 'succeeded',
+            'backend': 'noop',
+            'changed': False,
+            'message': ('No-op apply backend recorded the plan without '
+                        'changing configuration.'),
+        }
+        job = db.admin_config_apply_job_update(context, job['uuid'], {
+            'status': 'succeeded',
+            'result': _dumps(result),
+            'errors': _dumps([]),
+        })
+        db.admin_config_draft_update(context, draft_id, {
+            'status': 'applied',
+            'validation': _dumps(validation),
+            'plan': _dumps(plan),
+        })
+        return {'apply_job': AdminConfigApplyJobsController.view(job)}
+
+
+class AdminConfigApplyJobsController(wsgi.Controller):
+    """Config apply job lifecycle for Horizon."""
+
+    @staticmethod
+    def view(job):
+        result = {
+            'id': job['uuid'],
+            'draft_id': job['draft_uuid'],
+            'status': job['status'],
+            'strategy': job['strategy'],
+            'canary': job['canary'],
+            'comment': job['comment'],
+            'created_at': _format_datetime(job['created_at']),
+            'updated_at': _format_datetime(job['updated_at']),
+            'errors': _loads(job['errors']) or [],
+        }
+        plan = _loads(job['plan'])
+        if plan is not None:
+            result['plan'] = plan
+        apply_result = _loads(job['result'])
+        if apply_result is not None:
+            result['result'] = apply_result
+        return result
+
+    def _get(self, context, job_id):
+        try:
+            return db.admin_config_apply_job_get_by_uuid(context, job_id)
+        except exception.ConfigApplyJobNotFound as err:
+            raise exc.HTTPNotFound(explanation=err.format_message())
+
+    @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.BAD_REQUEST))
+    def index(self, req):
+        context = req.environ['masakari.context']
+        context.can(admin_config_policies.ADMIN_CONFIG_APPLY_JOBS % 'index')
+        filters = {}
+        if 'status' in req.params:
+            filters['status'] = req.params['status']
+        if 'draft_id' in req.params:
+            filters['draft_uuid'] = req.params['draft_id']
+        jobs = db.admin_config_apply_job_get_all(
+            context, filters=filters, sort_keys=['id'], sort_dirs=['desc'])
+        return {'apply_jobs': [self.view(job) for job in jobs]}
+
+    @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.NOT_FOUND))
+    def show(self, req, id):
+        context = req.environ['masakari.context']
+        context.can(admin_config_policies.ADMIN_CONFIG_APPLY_JOBS % 'detail')
+        return {'apply_job': self.view(self._get(context, id))}
+
+    @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.NOT_FOUND,
+                                 HTTPStatus.CONFLICT))
+    def rollback(self, req, job_id, body=None):
+        context = req.environ['masakari.context']
+        context.can(admin_config_policies.ADMIN_CONFIG_APPLY_JOBS % 'rollback')
+        self._get(context, job_id)
+        raise exc.HTTPConflict(explanation='Rollback is not supported by the '
+                               'no-op apply backend.')
+
 
 class AdminConfig(extensions.V1APIExtensionBase):
     """Admin config schema and effective values."""
@@ -510,14 +642,19 @@ class AdminConfig(extensions.V1APIExtensionBase):
                 'admin-config-drafts',
                 controller.drafts,
                 member_name='admin_config_draft',
-                custom_routes_fn=self.custom_routes),
+                custom_routes_fn=self.draft_custom_routes),
+            extensions.ResourceExtension(
+                'admin-config-apply-jobs',
+                controller.apply_jobs,
+                member_name='admin_config_apply_job',
+                custom_routes_fn=self.apply_job_custom_routes),
         ]
 
     def get_controller_extensions(self):
         return []
 
     @staticmethod
-    def custom_routes(mapper, wsgi_resource):
+    def draft_custom_routes(mapper, wsgi_resource):
         mapper.connect('admin-config-drafts-patch',
                        '/admin-config-drafts/{id}',
                        controller=wsgi_resource, action='update',
@@ -533,4 +670,15 @@ class AdminConfig(extensions.V1APIExtensionBase):
         mapper.connect('admin-config-drafts-plan',
                        '/admin-config-drafts/{draft_id}/plan',
                        controller=wsgi_resource, action='plan',
+                       conditions={'method': ['POST']})
+        mapper.connect('admin-config-drafts-apply',
+                       '/admin-config-drafts/{draft_id}/apply',
+                       controller=wsgi_resource, action='apply',
+                       conditions={'method': ['POST']})
+
+    @staticmethod
+    def apply_job_custom_routes(mapper, wsgi_resource):
+        mapper.connect('admin-config-apply-jobs-rollback',
+                       '/admin-config-apply-jobs/{job_id}/rollback',
+                       controller=wsgi_resource, action='rollback',
                        conditions={'method': ['POST']})

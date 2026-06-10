@@ -19,6 +19,7 @@ from masakari.policies import base
 
 ADMIN_CONFIG = 'os_masakari_api:admin-config:%s'
 ADMIN_CONFIG_DRAFTS = 'os_masakari_api:admin-config-drafts:%s'
+ADMIN_CONFIG_APPLY_JOBS = 'os_masakari_api:admin-config-apply-jobs:%s'
 
 rules = [
     policy.DocumentedRuleDefault(
@@ -126,10 +127,55 @@ rules = [
                 'path': '/admin-config-drafts/{draft_id}/plan'
             }
         ]),
+    policy.DocumentedRuleDefault(
+        name=ADMIN_CONFIG_DRAFTS % 'apply',
+        check_str=base.RULE_ADMIN_API,
+        description="Starts a Masakari admin config draft apply job.",
+        operations=[
+            {
+                'method': 'POST',
+                'path': '/admin-config-drafts/{draft_id}/apply'
+            }
+        ]),
     policy.RuleDefault(
         name=ADMIN_CONFIG_DRAFTS % 'discoverable',
         check_str=base.RULE_ADMIN_API,
         description="Admin config drafts API extension to change the API.",
+        ),
+    policy.DocumentedRuleDefault(
+        name=ADMIN_CONFIG_APPLY_JOBS % 'index',
+        check_str=base.RULE_ADMIN_API,
+        description="Lists Masakari admin config apply jobs.",
+        operations=[
+            {
+                'method': 'GET',
+                'path': '/admin-config-apply-jobs'
+            }
+        ]),
+    policy.DocumentedRuleDefault(
+        name=ADMIN_CONFIG_APPLY_JOBS % 'detail',
+        check_str=base.RULE_ADMIN_API,
+        description="Shows a Masakari admin config apply job.",
+        operations=[
+            {
+                'method': 'GET',
+                'path': '/admin-config-apply-jobs/{job_id}'
+            }
+        ]),
+    policy.DocumentedRuleDefault(
+        name=ADMIN_CONFIG_APPLY_JOBS % 'rollback',
+        check_str=base.RULE_ADMIN_API,
+        description="Requests rollback for a Masakari admin config apply job.",
+        operations=[
+            {
+                'method': 'POST',
+                'path': '/admin-config-apply-jobs/{job_id}/rollback'
+            }
+        ]),
+    policy.RuleDefault(
+        name=ADMIN_CONFIG_APPLY_JOBS % 'discoverable',
+        check_str=base.RULE_ADMIN_API,
+        description="Admin config apply jobs API extension to change the API.",
         ),
 ]
 

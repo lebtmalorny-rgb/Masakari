@@ -696,3 +696,79 @@ class AdminConfigDraftTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertRaises(exception.ConfigDraftNotFound,
                           db.admin_config_draft_get_by_uuid, self.ctxt,
                           draft['uuid'])
+
+
+class AdminConfigApplyJobTestCase(test.TestCase, ModelsObjectComparatorMixin):
+
+    def setUp(self):
+        super(AdminConfigApplyJobTestCase, self).setUp()
+        self.ctxt = context.get_admin_context()
+
+    def _get_fake_values(self):
+        return {
+            'uuid': uuidsentinel.admin_config_apply_job,
+            'draft_uuid': uuidsentinel.admin_config_draft,
+            'status': 'queued',
+            'strategy': 'noop',
+            'canary': False,
+            'comment': 'test apply',
+            'plan': '{"status": "planned"}',
+            'result': None,
+            'errors': None,
+        }
+
+    def _create_apply_job(self, values=None):
+        return db.admin_config_apply_job_create(
+            self.ctxt, values or self._get_fake_values())
+
+    def test_admin_config_apply_job_create(self):
+        job = self._create_apply_job()
+
+        self.assertIsNotNone(job['id'])
+        ignored_keys = ['deleted', 'created_at', 'updated_at', 'deleted_at',
+                        'id']
+        self._assertEqualObjects(job, self._get_fake_values(), ignored_keys)
+
+    def test_admin_config_apply_job_get_by_uuid(self):
+        job = self._create_apply_job()
+
+        result = db.admin_config_apply_job_get_by_uuid(
+            self.ctxt, job['uuid'])
+
+        self._assertEqualObjects(job, result)
+
+    def test_admin_config_apply_job_get_all(self):
+        first = self._create_apply_job()
+        second = self._create_apply_job({
+            'uuid': uuidsentinel.admin_config_apply_job_2,
+            'draft_uuid': uuidsentinel.admin_config_draft_2,
+            'status': 'succeeded',
+            'strategy': 'noop',
+            'canary': True,
+            'comment': None,
+            'plan': '{"status": "planned"}',
+            'result': '{"status": "succeeded"}',
+            'errors': None,
+        })
+
+        jobs = db.admin_config_apply_job_get_all(
+            self.ctxt, sort_keys=['id'], sort_dirs=['asc'])
+
+        self.assertEqual(2, len(jobs))
+        self._assertEqualObjects(first, jobs[0])
+        self._assertEqualObjects(second, jobs[1])
+
+    def test_admin_config_apply_job_update(self):
+        job = self._create_apply_job()
+
+        updated = db.admin_config_apply_job_update(
+            self.ctxt, job['uuid'],
+            {'status': 'succeeded', 'result': '{"status": "succeeded"}'})
+
+        self.assertEqual('succeeded', updated['status'])
+        self.assertEqual('{"status": "succeeded"}', updated['result'])
+
+    def test_admin_config_apply_job_not_found(self):
+        self.assertRaises(exception.ConfigApplyJobNotFound,
+                          db.admin_config_apply_job_get_by_uuid, self.ctxt,
+                          uuidsentinel.missing_apply_job)

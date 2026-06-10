@@ -470,6 +470,30 @@ def admin_config_draft_delete(context, draft_uuid):
     return IMPL.admin_config_draft_delete(context, draft_uuid)
 
 
+def admin_config_apply_job_create(context, values):
+    """Create an admin config apply job."""
+    return IMPL.admin_config_apply_job_create(context, values)
+
+
+def admin_config_apply_job_get_by_uuid(context, job_uuid):
+    """Get an admin config apply job by uuid."""
+    return IMPL.admin_config_apply_job_get_by_uuid(context, job_uuid)
+
+
+def admin_config_apply_job_get_all(context, filters=None, sort_keys=None,
+                                   sort_dirs=None, limit=None, marker=None):
+    """Get admin config apply jobs."""
+    return IMPL.admin_config_apply_job_get_all(context, filters=filters,
+                                               sort_keys=sort_keys,
+                                               sort_dirs=sort_dirs,
+                                               limit=limit, marker=marker)
+
+
+def admin_config_apply_job_update(context, job_uuid, values):
+    """Update an admin config apply job by uuid."""
+    return IMPL.admin_config_apply_job_update(context, job_uuid, values)
+
+
 def purge_deleted_rows(context, age_in_days, max_rows):
     """Purge the soft deleted rows.
 

@@ -109,6 +109,15 @@ class MigrationsWalk(
         self.assertIn('admin_config_drafts_status_idx',
                       [index['name'] for index in indexes])
 
+    def _check_4f2d6c8b91a0(self, connection):
+        self.assertTrue(connection.dialect.has_table(
+            connection, 'admin_config_apply_jobs'))
+        indexes = connection.dialect.get_indexes(
+            connection, 'admin_config_apply_jobs')
+        index_names = [index['name'] for index in indexes]
+        self.assertIn('admin_config_apply_jobs_draft_uuid_idx', index_names)
+        self.assertIn('admin_config_apply_jobs_status_idx', index_names)
+
 
 class TestMigrationsWalkSQLite(
     MigrationsWalk,

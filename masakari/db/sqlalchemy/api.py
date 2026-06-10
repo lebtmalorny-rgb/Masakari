@@ -820,6 +820,78 @@ def admin_config_draft_delete(context, draft_uuid):
         raise exception.ConfigDraftNotFound(draft_id=draft_uuid)
 
 
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.writer
+def admin_config_apply_job_create(context, values):
+    job = models.AdminConfigApplyJob()
+    job.update(values)
+
+    job.save(session=context.session)
+
+    return _admin_config_apply_job_get_by_uuid(context, job.uuid)
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.reader
+def admin_config_apply_job_get_by_uuid(context, job_uuid):
+    return _admin_config_apply_job_get_by_uuid(context, job_uuid)
+
+
+def _admin_config_apply_job_get_by_uuid(context, job_uuid):
+    query = model_query(
+        context, models.AdminConfigApplyJob).filter_by(uuid=job_uuid)
+
+    result = query.first()
+    if not result:
+        raise exception.ConfigApplyJobNotFound(job_id=job_uuid)
+
+    return result
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.reader
+def admin_config_apply_job_get_all(context, filters=None, sort_keys=None,
+                                   sort_dirs=None, limit=None, marker=None):
+    if limit == 0:
+        return []
+
+    sort_keys, sort_dirs = _process_sort_params(sort_keys, sort_dirs)
+    filters = filters or {}
+    query = model_query(context, models.AdminConfigApplyJob)
+
+    if 'status' in filters:
+        query = query.filter(models.AdminConfigApplyJob.status == filters[
+            'status'])
+    if 'draft_uuid' in filters:
+        query = query.filter(models.AdminConfigApplyJob.draft_uuid == filters[
+            'draft_uuid'])
+
+    marker_row = None
+    if marker is not None:
+        marker_row = model_query(
+            context, models.AdminConfigApplyJob).filter_by(id=marker).first()
+        if not marker_row:
+            raise exception.MarkerNotFound(marker=marker)
+
+    try:
+        query = sqlalchemyutils.paginate_query(
+            query, models.AdminConfigApplyJob, limit, sort_keys,
+            marker=marker_row, sort_dirs=sort_dirs)
+    except db_exc.InvalidSortKey as err:
+        raise exception.InvalidSortKey(err)
+
+    return query.all()
+
+
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+@main_context_manager.writer
+def admin_config_apply_job_update(context, job_uuid, values):
+    job = _admin_config_apply_job_get_by_uuid(context, job_uuid)
+    job.update(values)
+    job.save(session=context.session)
+    return _admin_config_apply_job_get_by_uuid(context, job.uuid)
+
+
 class DeleteFromSelect(sa_sql.expression.UpdateBase):
     inherit_cache = False
 

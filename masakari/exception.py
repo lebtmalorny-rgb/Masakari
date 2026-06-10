@@ -212,6 +212,10 @@ class ConfigDraftNotFound(NotFound):
     msg_fmt = _("Could not find config draft %(draft_id)s")
 
 
+class ConfigApplyJobNotFound(NotFound):
+    msg_fmt = _("Could not find config apply job %(job_id)s")
+
+
 class Forbidden(MasakariException):
     msg_fmt = _("Forbidden")
     code = HTTPStatus.FORBIDDEN

@@ -181,3 +181,25 @@ class AdminConfigDraft(BASE, MasakariAPIBase, models.SoftDeleteMixin):
     comment = Column(Text, nullable=True)
     validation = Column(Text, nullable=True)
     plan = Column(Text, nullable=True)
+
+
+class AdminConfigApplyJob(BASE, MasakariAPIBase, models.SoftDeleteMixin):
+    """Represents one admin configuration apply job."""
+    __tablename__ = 'admin_config_apply_jobs'
+    __table_args__ = (
+        schema.UniqueConstraint('uuid',
+                                name='uniq_admin_config_apply_job0uuid'),
+        Index('admin_config_apply_jobs_draft_uuid_idx', 'draft_uuid'),
+        Index('admin_config_apply_jobs_status_idx', 'status'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uuid = Column(String(36), nullable=False)
+    draft_uuid = Column(String(36), nullable=False)
+    status = Column(String(32), nullable=False)
+    strategy = Column(String(32), nullable=False)
+    canary = Column(Boolean, nullable=False, default=False)
+    comment = Column(Text, nullable=True)
+    plan = Column(Text, nullable=True)
+    result = Column(Text, nullable=True)
+    errors = Column(Text, nullable=True)

@@ -262,6 +262,81 @@ class AdminConfigTestCase(test.TestCase):
         self.assertEqual('reconfigure_required', actions[
             ('staged_recovery', 'batch_delay')])
 
+    def test_apply_draft_creates_succeeded_noop_job(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        result = self.controller.drafts.apply(req, created['draft']['uuid'],
+                                              body={
+            'apply': {
+                'strategy': 'rolling',
+                'canary': True,
+                'comment': 'dry run from Horizon'
+            }
+        })
+
+        job = result['apply_job']
+        self.assertEqual(created['draft']['uuid'], job['draft_id'])
+        self.assertEqual('succeeded', job['status'])
+        self.assertEqual('rolling', job['strategy'])
+        self.assertTrue(job['canary'])
+        self.assertEqual('noop', job['result']['backend'])
+        self.assertFalse(job['result']['changed'])
+
+        stored = self.controller.apply_jobs.show(req, job['id'])
+        self.assertEqual(job['id'], stored['apply_job']['id'])
+        draft = self.controller.drafts.show(req, created['draft']['uuid'])
+        self.assertEqual('applied', draft['draft']['status'])
+
+    def test_apply_draft_rejects_invalid_changes(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'does_not_exist': 1
+                    }
+                }
+            }
+        })
+
+        self.assertRaises(exc.HTTPBadRequest, self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={'apply': {}})
+
+    def test_apply_jobs_index_and_rollback_unsupported(self):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+        applied = self.controller.drafts.apply(
+            req, created['draft']['uuid'], body={'apply': {}})
+
+        index = self.controller.apply_jobs.index(req)
+
+        self.assertEqual(1, len(index['apply_jobs']))
+        self.assertEqual(applied['apply_job']['id'],
+                         index['apply_jobs'][0]['id'])
+        self.assertRaises(exc.HTTPConflict,
+                          self.controller.apply_jobs.rollback, req,
+                          applied['apply_job']['id'], body={'rollback': {}})
+
     @mock.patch('masakari.ha.api.NotificationAPI')
     def test_draft_routes(self, mock_notification_api):
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
@@ -293,3 +368,44 @@ class AdminConfigTestCase(test.TestCase):
         validate_response = validate_req.get_response(self.app)
 
         self.assertEqual(HTTPStatus.OK, validate_response.status_code)
+
+    @mock.patch('masakari.ha.api.NotificationAPI')
+    def test_apply_routes(self, mock_notification_api):
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        req.method = 'POST'
+        req.headers['Content-Type'] = 'application/json'
+        req.body = jsonutils.dump_as_bytes({
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+        response = req.get_response(self.app)
+        draft_uuid = jsonutils.loads(response.body)['draft']['uuid']
+
+        apply_req = fakes.HTTPRequest.blank(
+            '/v1/admin-config-drafts/%s/apply' % draft_uuid,
+            use_admin_context=True)
+        apply_req.method = 'POST'
+        apply_req.headers['Content-Type'] = 'application/json'
+        apply_req.body = jsonutils.dump_as_bytes({
+            'apply': {'strategy': 'rolling'}
+        })
+        apply_response = apply_req.get_response(self.app)
+
+        self.assertEqual(HTTPStatus.ACCEPTED, apply_response.status_code)
+        apply_body = jsonutils.loads(apply_response.body)
+        job_id = apply_body['apply_job']['id']
+
+        show_req = fakes.HTTPRequest.blank(
+            '/v1/admin-config-apply-jobs/%s' % job_id,
+            use_admin_context=True)
+        show_response = show_req.get_response(self.app)
+
+        self.assertEqual(HTTPStatus.OK, show_response.status_code)
+        show_body = jsonutils.loads(show_response.body)
+        self.assertEqual('succeeded', show_body['apply_job']['status'])
