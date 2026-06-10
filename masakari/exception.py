@@ -328,6 +328,14 @@ class StagedStartFailureException(HostRecoveryFailureException):
     msg_fmt = _('Failed to start staged recovery instances.')
 
 
+class RedfishFencingException(HostRecoveryFailureException):
+    msg_fmt = _('Failed to fence host using Redfish.')
+
+
+class RedfishIdentityMismatch(RedfishFencingException):
+    msg_fmt = _('Redfish system identity does not match expected host.')
+
+
 class InstanceRecoveryFailureException(MasakariException):
     msg_fmt = _('Failed to execute instance recovery workflow.')
 

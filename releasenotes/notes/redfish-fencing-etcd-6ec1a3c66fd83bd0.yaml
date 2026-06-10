@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Added optional Redfish fence-before-evacuate tasks for host failure
+    recovery. The tasks persist fencing state and proof in etcd and fail
+    closed so Nova evacuation does not proceed without verified
+    ``PowerState=Off`` for every host in the failure set.

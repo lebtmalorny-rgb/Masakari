@@ -29,6 +29,9 @@ Masakari has two main config files:
 * :doc:`Staged Recovery <staged_recovery>`: Operator guide for etcd-backed
   staged VM start after host failure recovery.
 
+* :doc:`Redfish Fencing <redfish_fencing>`: Operator guide for fencing failed
+  compute hosts before evacuation.
+
 Policy
 ------
 

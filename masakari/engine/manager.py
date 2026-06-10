@@ -236,6 +236,7 @@ class MasakariManager(manager.Manager):
                 self.driver.execute_host_failure(
                     context, host_name, recovery_method,
                     notification.notification_uuid,
+                    segment_uuid=host_obj.failover_segment.uuid,
                     update_host_method=update_host_method,
                     reserved_host_list=reserved_host_list)
             except exception.SkipHostRecoveryException:

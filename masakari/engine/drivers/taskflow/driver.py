@@ -139,8 +139,11 @@ class TaskFlowDriver(driver.NotificationDriver):
         # get flow for host failure
         process_what = {
             'host_name': host_name,
-            'notification_uuid': notification_uuid
+            'notification_uuid': notification_uuid,
+            'event_id': str(notification_uuid),
         }
+        if kwargs.get('segment_uuid'):
+            process_what['segment_uuid'] = kwargs['segment_uuid']
 
         try:
             if recovery_method == fields.FailoverSegmentRecoveryMethod.AUTO:

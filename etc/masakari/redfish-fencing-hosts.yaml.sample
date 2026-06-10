@@ -1,0 +1,20 @@
+schema_version: 1
+defaults:
+  scheme: https
+  port: 443
+  base_uri: /redfish/v1
+  auth_type: session
+  tls_verify: true
+hosts:
+  compute-01:
+    address: 10.10.20.101
+    systems_uri: /redfish/v1/Systems/1
+    username: masakari-fencer
+    password_file: /etc/masakari/secrets/compute-01-bmc.password
+    expected_serial_number: ABC12345
+  compute-02:
+    address: 10.10.20.102
+    systems_uri: /redfish/v1/Systems/1
+    username: masakari-fencer
+    password_file: /etc/masakari/secrets/compute-02-bmc.password
+    expected_serial_number: DEF67890
