@@ -19,6 +19,7 @@ from oslo_serialization import jsonutils
 from webob import exc
 
 from masakari.api.openstack.ha import admin_config
+from masakari import exception
 from masakari import test
 from masakari.tests.unit.api.openstack import fakes
 from masakari.tests import uuidsentinel
@@ -59,9 +60,24 @@ class AdminConfigTestCase(test.TestCase):
         result = self.controller.show(self.req, 'effective')
 
         staged = result['config']['staged_recovery']
-        self.assertEqual(5, staged['max_parallel_starts_per_host'])
+        self.assertEqual({'value': 5, 'source': 'config'},
+                         staged['max_parallel_starts_per_host'])
         self.assertEqual({'masked': True, 'configured': True},
                          staged['etcd_key_file'])
+
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_show_effective_reports_runtime_start_limit_source(
+            self, mock_store_cls):
+        store = mock_store_cls.return_value
+        store.get_max_parallel_starts_per_host_with_source.return_value = (
+            4, 'runtime')
+
+        result = self.controller.show(self.req, 'effective')
+
+        staged = result['config']['staged_recovery']
+        self.assertEqual({'value': 4, 'source': 'runtime'},
+                         staged['max_parallel_starts_per_host'])
 
     def test_show_rejects_unknown_resource(self):
         self.assertRaises(exc.HTTPNotFound, self.controller.show, self.req,
@@ -269,7 +285,7 @@ class AdminConfigTestCase(test.TestCase):
             'draft': {
                 'changes': {
                     'staged_recovery': {
-                        'max_parallel_starts_per_host': 4
+                        'batch_delay': 20
                     }
                 }
             }
@@ -297,6 +313,128 @@ class AdminConfigTestCase(test.TestCase):
         draft = self.controller.drafts.show(req, created['draft']['uuid'])
         self.assertEqual('applied', draft['draft']['status'])
 
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_runtime_start_limit_writes_etcd_override(
+            self, mock_store_cls):
+        store = mock_store_cls.return_value
+        store.set_max_parallel_starts_per_host.return_value = 4
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        result = self.controller.drafts.apply(req, created['draft']['uuid'],
+                                              body={'apply': {}})
+
+        store.set_max_parallel_starts_per_host.assert_called_once_with(4)
+        job = result['apply_job']
+        self.assertEqual('succeeded', job['status'])
+        self.assertEqual('runtime_etcd', job['result']['backend'])
+        self.assertTrue(job['result']['changed'])
+        self.assertEqual([{
+            'group': 'staged_recovery',
+            'option': 'max_parallel_starts_per_host',
+            'value': 4,
+            'source': 'runtime',
+        }], job['result']['runtime_updates'])
+
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_runtime_failure_marks_job_failed(self, mock_store_cls):
+        store = mock_store_cls.return_value
+        store.set_max_parallel_starts_per_host.side_effect = (
+            exception.InvalidInput(reason='limit is rejected by backend'))
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        self.assertRaises(exc.HTTPBadRequest, self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={'apply': {}})
+
+        jobs = self.controller.apply_jobs.index(req)['apply_jobs']
+        self.assertEqual(1, len(jobs))
+        job = jobs[0]
+        self.assertEqual('failed', job['status'])
+        self.assertEqual('runtime_etcd', job['result']['backend'])
+        self.assertFalse(job['result']['changed'])
+        self.assertEqual('runtime_apply_failed',
+                         job['errors'][0]['code'])
+        draft = self.controller.drafts.show(req, created['draft']['uuid'])
+        self.assertEqual('draft', draft['draft']['status'])
+
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_runtime_unexpected_failure_marks_job_failed(
+            self, mock_store_cls):
+        store = mock_store_cls.return_value
+        store.set_max_parallel_starts_per_host.side_effect = RuntimeError(
+            'etcd is unavailable')
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4
+                    }
+                }
+            }
+        })
+
+        self.assertRaises(exc.HTTPInternalServerError,
+                          self.controller.drafts.apply,
+                          req, created['draft']['uuid'], body={'apply': {}})
+
+        jobs = self.controller.apply_jobs.index(req)['apply_jobs']
+        self.assertEqual(1, len(jobs))
+        job = jobs[0]
+        self.assertEqual('failed', job['status'])
+        self.assertEqual('runtime_etcd', job['result']['backend'])
+        self.assertFalse(job['result']['changed'])
+        self.assertEqual('runtime_apply_failed',
+                         job['errors'][0]['code'])
+        draft = self.controller.drafts.show(req, created['draft']['uuid'])
+        self.assertEqual('draft', draft['draft']['status'])
+
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
+    def test_apply_mixed_draft_keeps_noop_backend(self, mock_store_cls):
+        store = mock_store_cls.return_value
+        req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
+                                      use_admin_context=True)
+        created = self.controller.drafts.create(req, body={
+            'draft': {
+                'changes': {
+                    'staged_recovery': {
+                        'max_parallel_starts_per_host': 4,
+                        'batch_delay': 20
+                    }
+                }
+            }
+        })
+
+        result = self.controller.drafts.apply(req, created['draft']['uuid'],
+                                              body={'apply': {}})
+
+        store.set_max_parallel_starts_per_host.assert_not_called()
+        self.assertEqual('noop', result['apply_job']['result']['backend'])
+
     def test_apply_draft_rejects_invalid_changes(self):
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
                                       use_admin_context=True)
@@ -320,7 +458,7 @@ class AdminConfigTestCase(test.TestCase):
             'draft': {
                 'changes': {
                     'staged_recovery': {
-                        'max_parallel_starts_per_host': 4
+                        'batch_delay': 20
                     }
                 }
             }
@@ -369,8 +507,12 @@ class AdminConfigTestCase(test.TestCase):
 
         self.assertEqual(HTTPStatus.OK, validate_response.status_code)
 
+    @mock.patch('masakari.api.openstack.ha.admin_config.'
+                'staged_state.EtcdStagedRecoveryStore')
     @mock.patch('masakari.ha.api.NotificationAPI')
-    def test_apply_routes(self, mock_notification_api):
+    def test_apply_routes(self, mock_notification_api, mock_store_cls):
+        store = mock_store_cls.return_value
+        store.set_max_parallel_starts_per_host.return_value = 4
         req = fakes.HTTPRequest.blank('/v1/admin-config-drafts',
                                       use_admin_context=True)
         req.method = 'POST'

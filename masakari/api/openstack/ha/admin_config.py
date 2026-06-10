@@ -26,6 +26,7 @@ from masakari.api.openstack import wsgi
 import masakari.conf
 from masakari.conf import staged_recovery as staged_recovery_conf
 from masakari import db
+from masakari.engine.drivers.taskflow import staged_state_etcd as staged_state
 from masakari import exception
 from masakari.policies import admin_config as admin_config_policies
 
@@ -92,6 +93,10 @@ def _format_datetime(value):
 
 def _staged_recovery_opts_by_name():
     return {opt.name: opt for opt in staged_recovery_conf.staged_recovery_opts}
+
+
+def _runtime_store():
+    return staged_state.EtcdStagedRecoveryStore(CONF, owner='api')
 
 
 def _iter_change_items(changes):
@@ -228,8 +233,20 @@ class AdminConfigController(wsgi.Controller):
         values = {}
         for opt in staged_recovery_conf.staged_recovery_opts:
             value = getattr(CONF.staged_recovery, opt.name)
-            values[opt.name] = _masked(value) if _is_secret_name(
-                opt.name) else value
+            if opt.name == 'max_parallel_starts_per_host':
+                try:
+                    runtime_value, source = (
+                        _runtime_store().
+                        get_max_parallel_starts_per_host_with_source(value))
+                except exception.MasakariException:
+                    runtime_value, source = value, 'config'
+                values[opt.name] = {
+                    'value': runtime_value,
+                    'source': source,
+                }
+            else:
+                values[opt.name] = _masked(value) if _is_secret_name(
+                    opt.name) else value
         return values
 
     @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.NOT_FOUND))
@@ -404,11 +421,78 @@ class AdminConfigDraftsController(wsgi.Controller):
             if change.get('file'):
                 step['file'] = change['file']
             steps.append(step)
+        runtime_only = bool(steps) and all(
+            step['action'] == 'runtime_update' for step in steps)
         return {
             'status': 'planned',
             'steps': steps,
-            'apply_supported': False,
+            'apply_supported': runtime_only,
         }
+
+    def _runtime_apply_supported(self, plan):
+        return (
+            plan.get('status') == 'planned' and
+            bool(plan.get('steps')) and
+            all(step['action'] == 'runtime_update'
+                for step in plan.get('steps', [])))
+
+    def _apply_runtime_changes(self, changes):
+        updates = []
+        store = _runtime_store()
+        for change in _iter_change_items(changes):
+            if change.get('error'):
+                continue
+            if (change['group'] == 'staged_recovery' and
+                    change['option'] == 'max_parallel_starts_per_host'):
+                value = store.set_max_parallel_starts_per_host(
+                    change['value'])
+                updates.append({
+                    'group': change['group'],
+                    'option': change['option'],
+                    'value': value,
+                    'source': 'runtime',
+                })
+        return updates
+
+    def _apply_result(self, changes, plan):
+        if self._runtime_apply_supported(plan):
+            updates = self._apply_runtime_changes(changes)
+            return {
+                'status': 'succeeded',
+                'backend': 'runtime_etcd',
+                'changed': bool(updates),
+                'runtime_updates': updates,
+                'message': 'Runtime configuration was applied to etcd.',
+            }
+        return {
+            'status': 'succeeded',
+            'backend': 'noop',
+            'changed': False,
+            'message': ('No-op apply backend recorded the plan without '
+                        'changing configuration.'),
+        }
+
+    def _apply_failure_result(self, plan, message):
+        backend = ('runtime_etcd' if self._runtime_apply_supported(plan)
+                   else 'noop')
+        return {
+            'status': 'failed',
+            'backend': backend,
+            'changed': False,
+            'message': message,
+        }
+
+    def _apply_failure_errors(self, plan, message):
+        code = ('runtime_apply_failed' if self._runtime_apply_supported(plan)
+                else 'apply_failed')
+        return [{'code': code, 'message': message}]
+
+    def _record_apply_failure(self, context, job_uuid, plan, message):
+        db.admin_config_apply_job_update(context, job_uuid, {
+            'status': 'failed',
+            'result': _dumps(self._apply_failure_result(plan, message)),
+            'errors': _dumps(self._apply_failure_errors(plan, message)),
+        })
 
     @extensions.expected_errors((HTTPStatus.FORBIDDEN, HTTPStatus.BAD_REQUEST))
     def index(self, req):
@@ -546,13 +630,16 @@ class AdminConfigDraftsController(wsgi.Controller):
             'result': None,
             'errors': None,
         })
-        result = {
-            'status': 'succeeded',
-            'backend': 'noop',
-            'changed': False,
-            'message': ('No-op apply backend recorded the plan without '
-                        'changing configuration.'),
-        }
+        try:
+            result = self._apply_result(changes, plan)
+        except exception.MasakariException as err:
+            message = err.format_message()
+            self._record_apply_failure(context, job['uuid'], plan, message)
+            raise exc.HTTPBadRequest(explanation=message)
+        except Exception as err:
+            self._record_apply_failure(context, job['uuid'], plan, str(err))
+            raise
+
         job = db.admin_config_apply_job_update(context, job['uuid'], {
             'status': 'succeeded',
             'result': _dumps(result),

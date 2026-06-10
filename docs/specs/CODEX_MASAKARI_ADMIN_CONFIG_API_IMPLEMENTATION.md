@@ -15,15 +15,20 @@ Horizon:
 - получение текущих effective values с маскированием secret-like полей;
 - CRUD для config drafts;
 - validation, diff и apply plan для draft;
-- no-op apply workflow с сохранением apply job в SQL DB;
+- runtime apply для `staged_recovery.max_parallel_starts_per_host` через etcd
+  override;
+- no-op apply workflow для draft-ов, которые требуют deployment/reconfigure
+  backend;
 - просмотр apply jobs;
 - rollback endpoint как явная заглушка с `409 Conflict`;
 - policy rules для всех новых Admin Config endpoints;
 - unit-тесты API, DB, миграции и policy/extension loading.
 
-Текущая реализация безопасна для интеграционной оценки Horizon, потому что
-`apply` не пишет конфигурационные файлы, не меняет runtime config, не пишет в
-etcd, не перезапускает сервисы и не вызывает внешний deployment backend.
+Текущая реализация безопасна для интеграционной оценки Horizon: `apply` не
+пишет конфигурационные файлы, не перезапускает сервисы и не вызывает внешний
+deployment backend. Единственное реальное изменение runtime state сейчас -
+запись `staged_recovery.max_parallel_starts_per_host` в существующий etcd
+runtime override, который уже читает staged recovery limiter.
 
 ## Область реализации
 
@@ -91,7 +96,7 @@ Apply jobs хранятся в SQL DB в таблице `admin_config_apply_jobs
 ```text
 uuid        - публичный идентификатор apply job;
 draft_uuid  - ссылка на config draft;
-status      - queued / succeeded / failed, сейчас фактически queued -> succeeded;
+status      - queued / succeeded / failed, сейчас фактически queued -> succeeded/failed;
 strategy    - строка из apply request, по умолчанию noop;
 canary      - boolean-флаг из apply request;
 comment     - комментарий apply request;
@@ -100,8 +105,9 @@ result      - JSON результат выполнения;
 errors      - JSON массив ошибок.
 ```
 
-В no-op backend apply job создается, затем в рамках того же HTTP request
-переводится в `succeeded`.
+Для runtime-only draft-а apply job создается и в рамках того же HTTP request
+завершается через backend `runtime_etcd`. Для draft-а с reconfigure-required
+изменениями job завершается через backend `noop`.
 
 ## Policy rules
 
@@ -214,7 +220,10 @@ Response:
   "config": {
     "staged_recovery": {
       "enabled": false,
-      "max_parallel_starts_per_host": 3,
+      "max_parallel_starts_per_host": {
+        "value": 3,
+        "source": "config"
+      },
       "etcd_password": {
         "masked": true,
         "configured": true
@@ -225,6 +234,9 @@ Response:
 ```
 
 Secret-like значения не возвращаются в открытом виде.
+Runtime-mutable `max_parallel_starts_per_host` возвращается как объект с
+`value` и `source`, где `source=config` означает значение из `masakari.conf`, а
+`source=runtime` означает etcd runtime override.
 
 ### POST `/v1/admin-config-drafts`
 
@@ -498,13 +510,19 @@ Response:
 }
 ```
 
-Текущее значение `apply_supported=false` означает, что production apply backend
-еще не реализован. При этом no-op apply endpoint доступен, чтобы Horizon мог
-отработать UX apply-job lifecycle без изменения реальной конфигурации.
+`apply_supported=true` выставляется для runtime-only plan, где все steps имеют
+`action=runtime_update`. Сейчас это только
+`staged_recovery.max_parallel_starts_per_host`.
+
+`apply_supported=false` для plan с `reconfigure_required` означает, что
+deployment/reconfigure backend еще не реализован. Такие draft-ы можно
+применить только как no-op apply job для проверки UX lifecycle без изменения
+реальной конфигурации.
 
 ### POST `/v1/admin-config-drafts/{draft_id}/apply`
 
-Создает no-op apply job.
+Создает apply job. Runtime-only draft применяется через etcd runtime override;
+draft с reconfigure-required изменениями остается no-op.
 
 Policy:
 
@@ -527,7 +545,7 @@ Request:
 Поля:
 
 ```text
-strategy - string, optional, default noop; сейчас только сохраняется в job;
+strategy - string, optional, default noop; сейчас сохраняется в job;
 canary   - boolean, optional, default false; сейчас только сохраняется в job;
 comment  - string, optional.
 ```
@@ -555,13 +573,21 @@ Response: `202 Accepted`
           "action": "runtime_update"
         }
       ],
-      "apply_supported": false
+      "apply_supported": true
     },
     "result": {
       "status": "succeeded",
-      "backend": "noop",
-      "changed": false,
-      "message": "No-op apply backend recorded the plan without changing configuration."
+      "backend": "runtime_etcd",
+      "changed": true,
+      "runtime_updates": [
+        {
+          "group": "staged_recovery",
+          "option": "max_parallel_starts_per_host",
+          "value": 4,
+          "source": "runtime"
+        }
+      ],
+      "message": "Runtime configuration was applied to etcd."
     }
   }
 }
@@ -577,13 +603,20 @@ Response: `202 Accepted`
    завершается `400 Bad Request`.
 6. API строит plan.
 7. API создает apply job со статусом `queued`.
-8. No-op backend сразу переводит job в `succeeded`.
-9. Draft переводится в `applied`.
-10. Response возвращает `apply_job`.
+8. Если plan runtime-only, backend `runtime_etcd` пишет supported values в
+   etcd runtime override и переводит job в `succeeded`.
+9. Если plan содержит `reconfigure_required`, no-op backend записывает plan без
+   изменения конфигурации и переводит job в `succeeded`.
+10. Если runtime backend возвращает `InvalidInput`, job переводится в `failed`,
+    request завершается `400 Bad Request`, draft остается не примененным.
+11. Если runtime backend падает неожиданно, job переводится в `failed`, а
+    request идет через стандартный `500 Internal Server Error` путь.
+12. Draft переводится в `applied` только после успешного apply.
+13. Response возвращает `apply_job`.
 
 Важно: статус draft `applied` в текущем MVP означает, что apply workflow был
-успешно записан и завершен no-op backend-ом. Это не означает, что live
-configuration была изменена.
+успешно записан и завершен. Для `backend=runtime_etcd` live runtime override
+действительно изменен; для `backend=noop` live configuration не изменена.
 
 ### GET `/v1/admin-config-apply-jobs`
 
@@ -743,7 +776,7 @@ Backend:
 - строит diff без раскрытия secret-like values;
 - строит plan с actions `runtime_update` или `reconfigure_required`.
 
-### 4. Horizon запускает no-op apply
+### 4. Horizon запускает apply
 
 Horizon вызывает:
 
@@ -751,7 +784,19 @@ Horizon вызывает:
 POST /v1/admin-config-drafts/{draft_id}/apply
 ```
 
-Backend создает apply job и сразу завершает его как:
+Для runtime-only draft-а backend создает apply job, записывает etcd runtime
+override и сразу завершает его как:
+
+```json
+{
+  "status": "succeeded",
+  "backend": "runtime_etcd",
+  "changed": true
+}
+```
+
+Для draft-а с reconfigure-required изменениями backend создает apply job и
+сразу завершает его как:
 
 ```json
 {
@@ -761,8 +806,9 @@ Backend создает apply job и сразу завершает его как:
 }
 ```
 
-Это подтверждает, что API contract и Horizon workflow работают, но live config
-не меняется.
+В UI нужно явно показывать backend. `runtime_etcd` означает реальное изменение
+runtime override, `noop` означает только запись apply lifecycle без изменения
+live config.
 
 ### 5. Horizon отслеживает job
 
@@ -773,9 +819,9 @@ GET /v1/admin-config-apply-jobs
 GET /v1/admin-config-apply-jobs/{job_id}
 ```
 
-Для no-op backend polling обычно не нужен, потому что job завершается в том же
-request. Для будущего external/ansible/kolla backend этот contract уже подходит
-под polling.
+Для `runtime_etcd` и `noop` polling обычно не нужен, потому что job завершается
+в том же request. Для будущего external/ansible/kolla backend этот contract уже
+подходит под polling.
 
 ## Что уже можно интегрировать в Horizon plugin
 
@@ -788,17 +834,17 @@ request. Для будущего external/ansible/kolla backend этот contrac
 - validate action;
 - diff view;
 - plan view;
-- apply action как dry-run/no-op apply;
+- apply action для runtime-only `max_parallel_starts_per_host`;
+- dry-run/no-op apply для reconfigure-required drafts;
 - список apply jobs;
 - детальную страницу apply job;
 - disabled или error-handled rollback action.
 
-Horizon plugin не должен интерпретировать no-op apply как реальное применение
-конфигурации. В UI стоит явно показывать backend/result:
+Horizon plugin должен явно показывать backend/result:
 
 ```text
-backend: noop
-changed: false
+backend: runtime_etcd | noop
+changed: true | false
 ```
 
 ## Что еще осталось доделать
@@ -833,7 +879,8 @@ Backend должен:
 
 ### 2. Настоящая асинхронность apply jobs
 
-Сейчас no-op apply завершается синхронно в HTTP request. Для production нужно:
+Сейчас `runtime_etcd` и `noop` apply завершаются синхронно в HTTP request. Для
+production нужно:
 
 - создать job `queued`;
 - передать выполнение worker-у или внешнему backend-у;
@@ -843,20 +890,11 @@ Backend должен:
 - добавить polling-friendly timestamps и progress;
 - добавить защиту от параллельных apply jobs.
 
-### 3. Реальный runtime apply для supported mutable options
+### 3. Расширение runtime apply
 
-Сейчас `max_parallel_starts_per_host` помечен как `runtime`, но apply не пишет
-runtime override в etcd. Нужно связать Admin Config API с уже реализованным
-runtime override staged recovery limit:
-
-```text
-staged_recovery.max_parallel_starts_per_host
-        -> etcd runtime config key
-        -> EtcdStartLimiter effective limit
-```
-
-После этого plan для runtime-only draft сможет реально менять поведение без
-перезапуска сервисов.
+Сейчас runtime apply реализован только для
+`staged_recovery.max_parallel_starts_per_host`. Если появятся другие runtime-safe
+options, нужно расширить allowlist, validation, plan и runtime backend.
 
 ### 4. Reconfigure apply для non-runtime options
 
@@ -1007,18 +1045,17 @@ core, если core changes не потребуются.
 Самый полезный следующий backend этап:
 
 ```text
-Реализовать runtime apply для staged_recovery.max_parallel_starts_per_host:
-draft -> validate -> plan -> apply -> запись runtime override в etcd -> apply job succeeded.
+Реализовать external deployment backend для reconfigure_required параметров:
+draft -> validate -> plan -> queued job -> deployment controller -> progress -> succeeded/failed.
 ```
 
 Почему именно он:
 
-- это маленький production-полезный срез;
-- он уже соответствует текущему `runtime_update` plan action;
-- он не требует перезапуска сервисов;
-- он напрямую нужен staged recovery limiter-у;
-- Horizon сможет показать не только no-op workflow, но и реально работающее
-  изменение безопасного параметра.
+- runtime-safe срез уже закрыт через `runtime_etcd`;
+- Horizon теперь сможет показать real apply для безопасного параметра и no-op
+  lifecycle для reconfigure-required параметров;
+- следующий пробел для production UX - реальное применение non-runtime values;
+- этот backend нужен для `batch_delay`, `start_timeout`, `slot_lease_ttl`,
+  `etcd_*`, `nova_evacuate_microversion` и будущих config groups.
 
-После этого можно переходить к external deployment backend для
-`reconfigure_required` параметров и к Horizon UI.
+Параллельно можно начинать Horizon UI/plugin клиент для текущего API contract.
